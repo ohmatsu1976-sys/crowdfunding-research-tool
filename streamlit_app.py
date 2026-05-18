@@ -180,7 +180,13 @@ def parse_url_lines(text: str):
         parts = line.split()
         if not parts[0].startswith("http"):
             continue
-        url = parts[0]
+        url = parts[0].split("?")[0].rstrip("/")
+        # KickstarterのタブURLサフィックスを除去（/creator /description など）
+        for _tab in ("/creator", "/description", "/updates", "/comments",
+                     "/community", "/faqs", "/risks", "/rewards"):
+            if url.endswith(_tab):
+                url = url[:-len(_tab)]
+                break
         # 金額を探す: $1,234,567 / ¥185,000,000 / 1234567
         amount_usd = 0.0
         for part in parts[1:]:
