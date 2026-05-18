@@ -1012,22 +1012,26 @@ def find_creator_site(creator_slug: str, product_name: str = "") -> str:
                 except Exception:
                     continue
 
-    # ── 2. DuckDuckGo で検索 ────────────────────────────────────────
-    query = product_name if product_name else creator_slug
-    query = f"{query} official site"
+    # ── 2. DuckDuckGo HTMLスクレイピングで検索 ──────────────────────
+    _SKIP_DOMAINS = (
+        "kickstarter.com", "indiegogo.com", "amazon.", "wikipedia.",
+        "facebook.com", "instagram.com", "twitter.com", "x.com",
+        "youtube.com", "linkedin.com", "tiktok.com",
+    )
+    query = f"{product_name or creator_slug} official site"
     try:
-        ddg_url = f"https://api.duckduckgo.com/?q={requests.utils.quote(query)}&format=json&no_redirect=1"
-        resp = sess.get(ddg_url, timeout=10)
+        ddg_url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}"
+        resp = sess.get(ddg_url, timeout=12)
         if resp.status_code == 200:
-            data = resp.json()
-            official = data.get("AbstractURL", "")
-            if not official and data.get("Results"):
-                official = data["Results"][0].get("FirstURL", "")
-            if official and not any(skip in official for skip in [
-                "kickstarter", "indiegogo", "amazon", "wikipedia",
-                "facebook", "instagram", "twitter", "youtube",
-            ]):
-                return official
+            soup = BeautifulSoup(resp.text, "html.parser")
+            for a in soup.select(".result__a"):
+                href = a.get("href", "")
+                # DDGリダイレクトURL から実URLを抽出
+                uddg = re.search(r"uddg=([^&]+)", href)
+                if uddg:
+                    href = requests.utils.unquote(uddg.group(1))
+                if href.startswith("http") and not any(s in href for s in _SKIP_DOMAINS):
+                    return href
     except Exception:
         pass
 
