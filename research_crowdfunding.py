@@ -740,76 +740,160 @@ def fetch_kickstarter_project(url: str) -> Optional[Dict]:
     return None
 
 
+def _parse_igg_campaign(camp: dict, url: str) -> Optional[Dict]:
+    """Indiegogo キャンペーンdictからプロジェクト情報を抽出"""
+    name = camp.get("title", "") or camp.get("name", "")
+    if not name:
+        return None
+    raised = float(
+        camp.get("collected_funds") or camp.get("amount_raised") or
+        camp.get("funds_raised_amount") or camp.get("raised_amount") or 0
+    )
+    backers = int(
+        camp.get("contributions_count") or camp.get("backers_count") or
+        camp.get("contribution_count") or 0
+    )
+    owner = camp.get("owner") or camp.get("team") or {}
+    if isinstance(owner, dict):
+        maker = owner.get("name") or owner.get("display_name") or ""
+    else:
+        maker = ""
+    return {
+        "platform":    "Indiegogo",
+        "name":        name,
+        "maker":       maker,
+        "url":         url,
+        "raised_usd":  raised,
+        "raised_jpy":  int(raised * JPY_PER_USD),
+        "backers":     backers,
+        "genre":       camp.get("category_name") or camp.get("category") or "",
+        "description": camp.get("tagline") or camp.get("short_description") or "",
+        "goal_usd":    float(camp.get("goal_amount") or camp.get("goal") or 0),
+        "country":     camp.get("country_code") or camp.get("country") or "",
+    }
+
+
 def fetch_indiegogo_project(url: str) -> Optional[Dict]:
     """Indiegogo プロジェクトページからデータを取得"""
     sess = _session()
-
-    # ── 1. private_api エンドポイント（最優先）───────────────────────
     slug_match = re.search(r"indiegogo\.com/projects/([^/#?]+)", url)
-    if slug_match:
-        slug = slug_match.group(1)
-        api_url = f"https://www.indiegogo.com/private_api/campaigns/{slug}"
-        try:
-            resp = sess.get(api_url, timeout=12)
-            if resp.status_code == 200:
-                data = resp.json()
-                camp = data.get("response", data)
-                name = camp.get("title", "")
-                if name:
-                    raised = float(camp.get("collected_funds", camp.get("amount_raised", 0)) or 0)
-                    backers = int(camp.get("contributions_count", 0) or 0)
-                    owner = camp.get("owner", {}) or {}
-                    return {
-                        "platform":    "Indiegogo",
-                        "name":        name,
-                        "maker":       owner.get("name", ""),
-                        "url":         url,
-                        "raised_usd":  raised,
-                        "raised_jpy":  int(raised * JPY_PER_USD),
-                        "backers":     backers,
-                        "genre":       camp.get("category_name", ""),
-                        "description": camp.get("tagline", ""),
-                        "goal_usd":    float(camp.get("goal_amount", 0) or 0),
-                        "country":     camp.get("country_code", ""),
-                    }
-        except Exception as e:
-            print(f"  [IGG] private_api エラー: {e}")
+    slug = slug_match.group(1) if slug_match else ""
 
-    # ── 2. HTMLスクレイピング（フォールバック）───────────────────────
+    # ── 1. private_api エンドポイント（複数パターン）────────────────
+    if slug:
+        api_candidates = [
+            f"https://www.indiegogo.com/private_api/campaigns/{slug}",
+            f"https://www.indiegogo.com/private_api/campaigns/{slug}/basics",
+        ]
+        for api_url in api_candidates:
+            try:
+                resp = sess.get(api_url, timeout=12)
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                # レスポンス構造: {"response": {...}} または直接 dict
+                camp = data.get("response") or data
+                if isinstance(camp, dict):
+                    result = _parse_igg_campaign(camp, url)
+                    if result:
+                        return result
+            except Exception as e:
+                print(f"  [IGG] private_api ({api_url[-30:]}): {e}")
+
+    # ── 2. HTMLスクレイピング ────────────────────────────────────────
     try:
         resp = sess.get(url, timeout=15)
         if resp.status_code != 200:
             return None
-        soup = BeautifulSoup(resp.text, "html.parser")
+        html = resp.text
+        soup = BeautifulSoup(html, "html.parser")
 
-        title_tag = soup.find("meta", property="og:title")
-        desc_tag  = soup.find("meta", property="og:description")
-        name  = title_tag["content"] if title_tag else ""
-        blurb = desc_tag["content"] if desc_tag else ""
+        # 2a. Next.js __NEXT_DATA__ （最近のIGG構造）
+        next_tag = soup.find("script", id="__NEXT_DATA__")
+        if next_tag and next_tag.string:
+            try:
+                ndata = json.loads(next_tag.string)
+                # props.pageProps.campaign / props.pageProps.data.campaign
+                pp = ndata.get("props", {}).get("pageProps", {})
+                camp = (pp.get("campaign") or pp.get("data", {}).get("campaign")
+                        or pp.get("project") or {})
+                if camp:
+                    result = _parse_igg_campaign(camp, url)
+                    if result:
+                        return result
+            except Exception:
+                pass
 
+        # 2b. JSON-LD structured data
+        for ld in soup.find_all("script", type="application/ld+json"):
+            try:
+                obj = json.loads(ld.string or "")
+                if obj.get("@type") in ("Product", "CreativeWork", "Event"):
+                    name = obj.get("name", "")
+                    desc = obj.get("description", "")
+                    if name:
+                        return {
+                            "platform": "Indiegogo", "name": name, "maker": "",
+                            "url": url, "raised_usd": 0, "raised_jpy": 0,
+                            "backers": 0, "genre": "", "description": desc,
+                            "goal_usd": 0, "country": "",
+                        }
+            except Exception:
+                pass
+
+        # 2c. スクリプトタグ内JSON（旧来パターン）
         raised = 0.0
         backers = 0
+        maker = ""
         for script in soup.find_all("script"):
             text = script.string or ""
-            if "collected_funds" in text or "amount_raised" in text:
-                m = re.search(r'"(?:collected_funds|amount_raised)"\s*:\s*([\d.]+)', text)
+            if not ("collected_funds" in text or "amount_raised" in text
+                    or "funds_raised" in text):
+                continue
+            try:
+                # JSON blob の可能性
+                m_json = re.search(r'(\{.*"title"\s*:\s*"[^"]+".*\})', text, re.S)
+                if m_json:
+                    obj = json.loads(m_json.group(1))
+                    result = _parse_igg_campaign(obj, url)
+                    if result:
+                        return result
+            except Exception:
+                pass
+            # フィールドを個別抽出
+            for pat in [r'"(?:collected_funds|amount_raised|funds_raised_amount)"\s*:\s*([\d.]+)',
+                        r"collected_funds['\"]?\s*:\s*([\d.]+)"]:
+                m = re.search(pat, text)
                 if m:
                     raised = float(m.group(1))
-                m2 = re.search(r'"contributions_count"\s*:\s*(\d+)', text)
-                if m2:
-                    backers = int(m2.group(1))
-                break
+                    break
+            m2 = re.search(r'"contributions_count"\s*:\s*(\d+)', text)
+            if m2:
+                backers = int(m2.group(1))
+            m3 = re.search(r'"owner"\s*:\s*\{[^}]*"name"\s*:\s*"([^"]+)"', text)
+            if m3:
+                maker = m3.group(1)
+            break
 
-        return {
-            "platform": "Indiegogo", "name": name, "maker": "",
-            "url": url, "raised_usd": raised,
-            "raised_jpy": int(raised * JPY_PER_USD),
-            "backers": backers, "genre": "",
-            "description": blurb, "goal_usd": 0, "country": "",
-        }
+        # 2d. og:title / og:description で最低限の情報を返す
+        title_tag = soup.find("meta", property="og:title")
+        desc_tag  = soup.find("meta", property="og:description")
+        name  = (title_tag.get("content", "") if title_tag else "") or ""
+        blurb = (desc_tag.get("content", "") if desc_tag else "") or ""
+
+        if name:
+            return {
+                "platform": "Indiegogo", "name": name, "maker": maker,
+                "url": url, "raised_usd": raised,
+                "raised_jpy": int(raised * JPY_PER_USD),
+                "backers": backers, "genre": "",
+                "description": blurb, "goal_usd": 0, "country": "",
+            }
+
     except Exception as e:
         print(f"  [IGG] ページ取得エラー: {e}")
-        return None
+
+    return None
 
 
 def _extract_creator_from_ks_url(url: str) -> str:
