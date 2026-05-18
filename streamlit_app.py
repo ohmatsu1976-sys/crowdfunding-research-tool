@@ -75,10 +75,9 @@ with st.sidebar:
 
     st.divider()
     st.divider()
-    st.markdown("### ⚠️ 入力フォーマット（必須）")
-    st.markdown("**調達額は必ず入力してください。** URLの後ろに半角スペース＋金額を追加します。")
-    st.code("https://www.kickstarter.com/projects/xxx/yyy  $1,234,567\nhttps://www.indiegogo.com/projects/zzz  $890,000", language=None)
-    st.caption("KickstarterのPledged欄・IndiegogoのRaised欄の金額をコピーしてください。")
+    st.markdown("### 入力フォーマット")
+    st.code("https://www.kickstarter.com/projects/xxx/yyy\nhttps://www.indiegogo.com/projects/zzz", language=None)
+    st.caption("URLを1行1件で貼り付けるだけでOKです。調達額は自動取得します。")
 
     st.markdown("### 良い商品の見つけ方")
     st.markdown("""
@@ -158,16 +157,10 @@ st.markdown(
     "最大 **30件** まで処理できます。"
 )
 
-st.error(
-    "⚠️ **調達額（$金額）を必ずURLの後ろに入力してください。**\n"
-    "KickstarterページのPledged欄 / IndiegogoページのRaised欄の金額をコピーし、URLの後ろに半角スペースを挟んで貼り付けます。\n"
-    "調達額がないと分析が実行できません。"
-)
-
 PLACEHOLDER = (
-    "https://www.kickstarter.com/projects/example/product-name  $1,234,567\n"
-    "https://www.indiegogo.com/projects/product-name  $890,000\n"
-    "← URLの後ろに半角スペース＋$金額（必須）"
+    "https://www.kickstarter.com/projects/example/product-name\n"
+    "https://www.indiegogo.com/projects/product-name\n"
+    "（URLを1行1件で貼り付けてください）"
 )
 
 urls_text = st.text_area(
@@ -208,40 +201,10 @@ import re
 url_entries = parse_url_lines(urls_text)
 urls = [e["url"] for e in url_entries]
 
-missing_amount = [e for e in url_entries if e["amount_usd"] == 0]
-
 if url_entries:
     if len(urls) > 30:
         st.warning("30件を超えるURLは最初の30件のみ処理されます")
-
-    # URLと調達額の確認テーブル
-    preview_rows = []
-    for e in url_entries[:30]:
-        short = e["url"][:60] + ("..." if len(e["url"]) > 60 else "")
-        if e["amount_usd"] > 0:
-            jpy = int(e["amount_usd"] * JPY_PER_USD)
-            amt_str = f"¥{jpy:,}（${e['amount_usd']:,.0f}）"
-            status = "✅"
-        else:
-            amt_str = "⚠️ 未入力"
-            status = "⚠️"
-        preview_rows.append({"": status, "URL": short, "調達額": amt_str})
-
-    st.dataframe(
-        pd.DataFrame(preview_rows),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    if missing_amount:
-        st.error(
-            f"⚠️ **{len(missing_amount)}件のURLに調達額が入力されていません。**\n\n"
-            "URLの後ろに半角スペース＋金額を入力してください。\n"
-            "例：`https://www.kickstarter.com/projects/... $1,234,567`\n\n"
-            "KickstarterページのURLをコピーする前に、調達額（Pledged欄の金額）もコピーしてください。"
-        )
-    else:
-        st.success(f"✅ {len(urls)} 件のURLと調達額を確認しました")
+    st.success(f"✅ {len(urls)} 件のURLを検出しました")
 
 st.divider()
 
@@ -249,24 +212,19 @@ st.divider()
 
 st.subheader("Step 2　リサーチ開始")
 
-_can_run = len(urls) > 0 and len(missing_amount) == 0
-
 col_btn, col_note = st.columns([1, 3])
 with col_btn:
     run = st.button(
         "▶ リサーチ開始",
         type="primary",
-        disabled=(not _can_run),
+        disabled=(len(urls) == 0),
         use_container_width=True,
     )
 with col_note:
-    if not _can_run and len(urls) > 0:
-        st.markdown("⬆️ 調達額を全URLに入力してから開始してください")
-    else:
-        st.markdown(
-            "1件あたり約 **30〜60秒** かかります。"
-            "ブラウザを閉じないでください。"
-        )
+    st.markdown(
+        "1件あたり約 **30〜60秒** かかります。"
+        "ブラウザを閉じないでください。"
+    )
 
 if run:
     # APIキー取得

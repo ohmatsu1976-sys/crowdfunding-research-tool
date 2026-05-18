@@ -536,61 +536,74 @@ def _clean_ks_url(url: str) -> str:
 
 
 def fetch_kickstarter_project(url: str) -> Optional[Dict]:
-    """Kickstarter プロジェクトページからデータを取得（cloudscraper使用）"""
+    """Kickstarter プロジェクトページからデータを取得"""
     base_url = _clean_ks_url(url)
-    scraper  = _ks_session()
+    sess = _session()
 
+    # ── 1. JSON APIエンドポイント（Cloudflare回避・最優先）───────────
+    json_url = base_url + ".json"
+    try:
+        resp = sess.get(json_url, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            proj = data.get("project", data)
+            name = proj.get("name", "")
+            if name:
+                pledged = float(proj.get("pledged", 0) or 0)
+                creator = proj.get("creator", {}) or {}
+                creator_slug = _extract_creator_from_ks_url(base_url)
+                return {
+                    "platform":      "Kickstarter",
+                    "name":          name,
+                    "maker":         creator.get("name", creator_slug),
+                    "url":           base_url,
+                    "raised_usd":    pledged,
+                    "raised_jpy":    int(pledged * JPY_PER_USD),
+                    "backers":       int(proj.get("backers_count", 0) or 0),
+                    "genre":         "Technology",
+                    "description":   proj.get("blurb", proj.get("description", "")),
+                    "goal_usd":      float(proj.get("goal", 0) or 0),
+                    "country":       proj.get("country", ""),
+                    "_creator_slug": creator_slug,
+                }
+    except Exception as e:
+        print(f"  [KS] JSON API エラー: {e}")
+
+    # ── 2. cloudscraperでHTMLスクレイピング（フォールバック）────────
+    scraper = _ks_session()
     try:
         resp = scraper.get(base_url, timeout=20, allow_redirects=True)
         if resp.status_code != 200:
             print(f"  [KS] HTTP {resp.status_code}: {base_url}")
             return None
 
-        final_url = resp.url  # リダイレクト後の実URL
+        final_url = resp.url
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        # ── data-initial 属性から JSON を取得（最も確実）─────────────
         for tag in soup.find_all(attrs={"data-initial": True}):
             try:
-                import json as _json
-                data = _json.loads(tag["data-initial"])
+                data = json.loads(tag["data-initial"])
                 proj = data.get("project", data)
                 name = proj.get("name", "")
                 if not name:
                     continue
-
-                # 調達額
                 pledged_raw = proj.get("pledged", {})
-                if isinstance(pledged_raw, dict):
-                    pledged = float(pledged_raw.get("amount", 0) or 0)
-                else:
-                    pledged = float(pledged_raw or 0)
-
-                # メーカー名はクリエイタースラグから
-                slug = proj.get("slug", "")
-                creator_slug = slug.split("/")[0] if "/" in slug else _extract_creator_from_ks_url(final_url)
-
+                pledged = float(pledged_raw.get("amount", 0) if isinstance(pledged_raw, dict) else (pledged_raw or 0))
+                creator_slug = _extract_creator_from_ks_url(final_url)
                 return {
-                    "platform":   "Kickstarter",
-                    "name":       name,
-                    "maker":      creator_slug,
-                    "url":        final_url,
-                    "raised_usd": pledged,
+                    "platform": "Kickstarter", "name": name, "maker": creator_slug,
+                    "url": final_url, "raised_usd": pledged,
                     "raised_jpy": int(pledged * JPY_PER_USD),
-                    "backers":    int(proj.get("backersCount", 0) or 0),
-                    "genre":      "Technology",
-                    "description": proj.get("description", ""),
-                    "goal_usd":   0,
-                    "country":    "",
-                    "_creator_slug": creator_slug,
+                    "backers": int(proj.get("backersCount", 0) or 0),
+                    "genre": "Technology", "description": proj.get("description", ""),
+                    "goal_usd": 0, "country": "", "_creator_slug": creator_slug,
                 }
             except Exception:
                 continue
 
-        # ── フォールバック: OGタグ ───────────────────────────────────
         title_tag = soup.find("meta", property="og:title")
         desc_tag  = soup.find("meta", property="og:description")
-        name  = title_tag["content"] if title_tag else (soup.title.string if soup.title else "")
+        name = title_tag["content"] if title_tag else (soup.title.string if soup.title else "")
         blurb = desc_tag["content"] if desc_tag else ""
         creator_slug = _extract_creator_from_ks_url(final_url)
         if name:
@@ -611,6 +624,39 @@ def fetch_kickstarter_project(url: str) -> Optional[Dict]:
 def fetch_indiegogo_project(url: str) -> Optional[Dict]:
     """Indiegogo プロジェクトページからデータを取得"""
     sess = _session()
+
+    # ── 1. private_api エンドポイント（最優先）───────────────────────
+    slug_match = re.search(r"indiegogo\.com/projects/([^/#?]+)", url)
+    if slug_match:
+        slug = slug_match.group(1)
+        api_url = f"https://www.indiegogo.com/private_api/campaigns/{slug}"
+        try:
+            resp = sess.get(api_url, timeout=12)
+            if resp.status_code == 200:
+                data = resp.json()
+                camp = data.get("response", data)
+                name = camp.get("title", "")
+                if name:
+                    raised = float(camp.get("collected_funds", camp.get("amount_raised", 0)) or 0)
+                    backers = int(camp.get("contributions_count", 0) or 0)
+                    owner = camp.get("owner", {}) or {}
+                    return {
+                        "platform":    "Indiegogo",
+                        "name":        name,
+                        "maker":       owner.get("name", ""),
+                        "url":         url,
+                        "raised_usd":  raised,
+                        "raised_jpy":  int(raised * JPY_PER_USD),
+                        "backers":     backers,
+                        "genre":       camp.get("category_name", ""),
+                        "description": camp.get("tagline", ""),
+                        "goal_usd":    float(camp.get("goal_amount", 0) or 0),
+                        "country":     camp.get("country_code", ""),
+                    }
+        except Exception as e:
+            print(f"  [IGG] private_api エラー: {e}")
+
+    # ── 2. HTMLスクレイピング（フォールバック）───────────────────────
     try:
         resp = sess.get(url, timeout=15)
         if resp.status_code != 200:
@@ -622,7 +668,6 @@ def fetch_indiegogo_project(url: str) -> Optional[Dict]:
         name  = title_tag["content"] if title_tag else ""
         blurb = desc_tag["content"] if desc_tag else ""
 
-        # JSON-LD または inline data から調達額を探す
         raised = 0.0
         backers = 0
         for script in soup.find_all("script"):
