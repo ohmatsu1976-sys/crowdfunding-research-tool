@@ -531,9 +531,19 @@ def build_row(p: Dict, analysis: Dict, contact: Dict) -> Dict:
 # URL から直接プロジェクト情報を取得
 # ───────────────────────────────────────────────────────────────────────────────
 
+_KS_TAB_SUFFIXES = (
+    "/creator", "/description", "/updates", "/comments",
+    "/community", "/faqs", "/risks", "/rewards",
+)
+
 def _clean_ks_url(url: str) -> str:
-    """クエリパラメータを除去してプロジェクト基本URLを返す"""
-    return url.split("?")[0].rstrip("/")
+    """クエリパラメータ・タブパスを除去してプロジェクト基本URLを返す"""
+    base = url.split("?")[0].rstrip("/")
+    for tab in _KS_TAB_SUFFIXES:
+        if base.endswith(tab):
+            base = base[:-len(tab)]
+            break
+    return base
 
 
 def fetch_kickstarter_project(url: str) -> Optional[Dict]:
