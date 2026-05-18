@@ -1226,12 +1226,30 @@ def _extract_from_slug(url: str) -> Dict:
     maker = "" if str(creator).isdigit() else creator
     # ハイフン区切りを単語に変換して商品名を推定
     name = " ".join(w.capitalize() for w in slug.replace("-", " ").split())
+
+    # 一般冠詞・無意味な先頭語の除外リスト（ブランド名抽出時に使用）
+    _STOPWORDS = {"the", "a", "an", "my", "your", "our", "this", "that",
+                  "new", "smart", "ai", "for", "of"}
+
     if "kickstarter.com" in url:
         platform = "Kickstarter"
     elif "zeczec.com" in url:
         platform = "ZECZEC"
+        # ZECZECはスラグの先頭単語がブランド名のことが多い（例: kieslect-ai-watch → kieslect）
+        # creator が取れていない場合のみ、スラグ先頭からブランド名を推定
+        if not creator and "-" in slug:
+            first_word = slug.split("-")[0].lower()
+            if first_word and first_word not in _STOPWORDS and len(first_word) >= 3:
+                creator = first_word
+                maker = first_word.capitalize()
     else:
         platform = "Indiegogo"
+        # Indiegogoの旧形式URL（creator不在）でも先頭単語をブランド名として推定
+        if not creator and "-" in slug:
+            first_word = slug.split("-")[0].lower()
+            if first_word and first_word not in _STOPWORDS and len(first_word) >= 3:
+                creator = first_word
+                maker = first_word.capitalize()
     return {
         "platform": platform, "name": name, "maker": maker,
         "url": base, "raised_usd": 0, "raised_jpy": 0,
