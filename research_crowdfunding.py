@@ -41,6 +41,7 @@ except ImportError:
 # ───────────────────────────────────────────────────────────────────────────────
 
 JPY_PER_USD    = 150.0
+JPY_PER_TWD    = 4.7          # 台湾ドル → 円（ZECZEC用）
 MIN_RAISED_USD = 333_000      # ¥50M 相当
 MAX_RAISED_USD = 2_000_000    # ¥300M 相当
 API_WAIT_SEC   = 1.5          # スクレイピング間隔（礼儀）
@@ -1225,7 +1226,12 @@ def _extract_from_slug(url: str) -> Dict:
     maker = "" if str(creator).isdigit() else creator
     # ハイフン区切りを単語に変換して商品名を推定
     name = " ".join(w.capitalize() for w in slug.replace("-", " ").split())
-    platform = "Kickstarter" if "kickstarter.com" in url else "Indiegogo"
+    if "kickstarter.com" in url:
+        platform = "Kickstarter"
+    elif "zeczec.com" in url:
+        platform = "ZECZEC"
+    else:
+        platform = "Indiegogo"
     return {
         "platform": platform, "name": name, "maker": maker,
         "url": base, "raised_usd": 0, "raised_jpy": 0,
@@ -1236,12 +1242,134 @@ def _extract_from_slug(url: str) -> Dict:
     }
 
 
+def _parse_zeczec_campaign(data: dict, url: str) -> Optional[Dict]:
+    """ZECZEC キャンペーン情報を抽出（台湾ドル NT$ → JPY/USD換算）"""
+    campaign = data.get("campaign", {})
+    if not campaign:
+        return None
+
+    name = campaign.get("title", "")
+    if not name:
+        return None
+
+    # ZECZECは台湾ドル(TWD)建て
+    raised_twd = float(campaign.get("collected_amount", 0) or 0)
+    raised_jpy = int(raised_twd * JPY_PER_TWD)
+    raised_usd = raised_jpy / JPY_PER_USD if raised_jpy > 0 else 0.0
+
+    target_twd = float(campaign.get("target_amount", 0) or 0)
+    goal_usd = (target_twd * JPY_PER_TWD) / JPY_PER_USD if target_twd > 0 else 0.0
+
+    creator = campaign.get("creator", {})
+    maker = creator.get("name", "") if isinstance(creator, dict) else ""
+
+    return {
+        "platform":    "ZECZEC",
+        "name":        name,
+        "maker":       maker,
+        "url":         url,
+        "raised_usd":  raised_usd,
+        "raised_jpy":  raised_jpy,
+        "backers":     int(campaign.get("supporter_count", 0) or 0),
+        "genre":       campaign.get("category_name", ""),
+        "description": campaign.get("summary", ""),
+        "goal_usd":    goal_usd,
+        "country":     "TW",
+    }
+
+
+def fetch_zeczec_project(url: str) -> Optional[Dict]:
+    """ZECZEC プロジェクトページからデータを取得"""
+    sess = _session()
+    base_url = url.rstrip("/").split("?")[0]
+
+    try:
+        resp = sess.get(base_url, timeout=15, allow_redirects=True)
+        if resp.status_code != 200:
+            return None
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # __ ページ内JSON データを探す __
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string)
+                if isinstance(data, dict) and "campaign" in data:
+                    result = _parse_zeczec_campaign(data, base_url)
+                    if result:
+                        return result
+            except Exception:
+                continue
+
+        # __ 代替: React state データを探す __
+        for script in soup.find_all("script"):
+            if script.string and "window.__INITIAL_STATE__" in script.string:
+                try:
+                    match = re.search(r'window\.__INITIAL_STATE__\s*=\s*({.*?});', script.string)
+                    if match:
+                        data = json.loads(match.group(1))
+                        # ネストされた構造に対応
+                        campaign_data = data.get("campaign", {}) or data.get("data", {})
+                        if campaign_data:
+                            result = _parse_zeczec_campaign({"campaign": campaign_data}, base_url)
+                            if result:
+                                return result
+                except Exception:
+                    continue
+
+        # __ HTMLからメタ情報を抽出（NT$ 台湾ドル）__
+        title = ""
+        raised_twd = 0.0
+
+        og_title = soup.find("meta", property="og:title")
+        if og_title and og_title.get("content"):
+            title = og_title["content"]
+
+        # 金額情報をHTMLから抽出（NT$1,234,567 / NT$ 1,234,567 / $1,234,567 等）
+        for tag in soup.find_all(["span", "div", "p", "h1", "h2", "h3"]):
+            text = tag.get_text(strip=True)
+            # 「NT$1,234,567」または「$1,234,567」パターン
+            m = re.search(r"NT\$\s*([\d,]+)", text)
+            if not m:
+                m = re.search(r"\$\s*([\d,]+)", text)
+            if m:
+                val = float(m.group(1).replace(",", ""))
+                if val >= 1000:  # ノイズ除外
+                    raised_twd = val
+                    break
+
+        if title and raised_twd > 0:
+            raised_jpy = int(raised_twd * JPY_PER_TWD)
+            return {
+                "platform":    "ZECZEC",
+                "name":        title,
+                "maker":       "",
+                "url":         base_url,
+                "raised_usd":  raised_jpy / JPY_PER_USD,
+                "raised_jpy":  raised_jpy,
+                "backers":     0,
+                "genre":       "",
+                "description": "",
+                "goal_usd":    0.0,
+                "country":     "TW",
+                "_from_slug":  True,
+            }
+
+        return None
+
+    except Exception as e:
+        print(f"  [ZECZEC] エラー: {e}")
+        return None
+
+
 def fetch_project_from_url(url: str) -> Optional[Dict]:
     """URL から自動判定してプロジェクト情報を取得。失敗時はURLスラグで代替"""
     if "kickstarter.com" in url:
         result = fetch_kickstarter_project(url)
     elif "indiegogo.com" in url:
         result = fetch_indiegogo_project(url)
+    elif "zeczec.com" in url:
+        result = fetch_zeczec_project(url)
     else:
         return None
     # スクレイピング失敗 → URLスラグから最低限の情報を生成してClaude分析は実行する

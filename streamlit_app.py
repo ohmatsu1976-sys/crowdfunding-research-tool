@@ -73,6 +73,13 @@ with st.sidebar:
 - [最多調達（Design）](https://www.indiegogo.com/explore/design#/?sort=most_funded&project_type=campaign)
 """)
 
+    st.markdown("### ZECZEC")
+    st.markdown("""
+- [人気プロジェクト](https://zeczec.com/discover)
+- [新着プロジェクト](https://zeczec.com/campaigns?sort=newest)
+- [資金調達額TOP](https://zeczec.com/campaigns?sort=collected_amount)
+""")
+
     st.divider()
     st.divider()
     st.markdown("### 入力フォーマット")
@@ -117,7 +124,7 @@ with st.sidebar:
 
 st.title("🔍 海外クラファン商品リサーチツール")
 st.caption(
-    "Kickstarter・Indiegogo のプロジェクト URL を入力すると、"
+    "Kickstarter・Indiegogo・ZECZEC のプロジェクト URL を入力すると、"
     "日本販売可能性・競合・営業メールを AI が自動分析します"
 )
 
@@ -153,13 +160,14 @@ st.divider()
 
 st.subheader("Step 1　URLを貼り付けてください")
 st.markdown(
-    "KickstarterまたはIndiegogoのプロジェクトURLを **1行に1つ** 貼り付けてください。"
+    "KickstarterまたはIndiegogoまたはZECZECのプロジェクトURLを **1行に1つ** 貼り付けてください。"
     "最大 **30件** まで処理できます。"
 )
 
 PLACEHOLDER = (
     "https://www.kickstarter.com/projects/example/product-name\n"
     "https://www.indiegogo.com/projects/product-name\n"
+    "https://zeczec.com/campaigns/1234567890/about\n"
     "（URLを1行1件で貼り付けてください）"
 )
 
@@ -313,7 +321,12 @@ if run:
             continue
 
         if p.get("_from_slug"):
-            platform_label = "IGG" if "indiegogo" in url else "KS"
+            if "indiegogo" in url:
+                platform_label = "IGG"
+            elif "zeczec" in url:
+                platform_label = "ZECZEC"
+            else:
+                platform_label = "KS"
             log_lines.append(f"      ⚠️ {platform_label}自動取得不可（URLから商品名推定）: {p.get('name','')[:40]}")
         else:
             log_lines.append(f"      ✅ 商品名: {p.get('name','')[:40]}")
@@ -553,6 +566,6 @@ if run:
 
 st.divider()
 st.markdown(
-    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-18v</small>",
+    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-18w</small>",
     unsafe_allow_html=True,
 )
