@@ -878,16 +878,27 @@ def fetch_indiegogo_project(url: str) -> Optional[Dict]:
         # 2d. og:title / og:description で最低限の情報を返す
         title_tag = soup.find("meta", property="og:title")
         desc_tag  = soup.find("meta", property="og:description")
-        name  = (title_tag.get("content", "") if title_tag else "") or ""
-        blurb = (desc_tag.get("content", "") if desc_tag else "") or ""
+        raw_title = (title_tag.get("content", "") if title_tag else "") or ""
+        blurb     = (desc_tag.get("content", "") if desc_tag else "") or ""
 
-        if name:
+        if raw_title and raw_title.lower() != "indiegogo":
+            # "Product Name by Maker - Indiegogo" → name="Product Name", maker="Maker"
+            clean = re.sub(r"\s*-\s*Indiegogo\s*$", "", raw_title, flags=re.I).strip()
+            by_match = re.search(r"^(.+?)\s+by\s+([^-|]+)$", clean, re.I)
+            if by_match:
+                name  = by_match.group(1).strip()
+                maker = maker or by_match.group(2).strip()
+            else:
+                name = clean
+            # メーカー名スラグ（ドメイン探索用）
+            maker_slug = re.sub(r"[^a-z0-9]", "", maker.lower()) if maker else ""
             return {
                 "platform": "Indiegogo", "name": name, "maker": maker,
                 "url": url, "raised_usd": raised,
                 "raised_jpy": int(raised * JPY_PER_USD),
                 "backers": backers, "genre": "",
                 "description": blurb, "goal_usd": 0, "country": "",
+                "_creator_slug": maker_slug,  # ドメイン探索・DuckDuckGo検索に使用
             }
 
     except Exception as e:
