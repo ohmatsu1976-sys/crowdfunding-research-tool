@@ -355,7 +355,10 @@ if run:
                 log_lines.append(f"      📋 IGGプロフィール(確認済): {valid_prof[:50]}")
                 log_area.code("\n".join(log_lines[-8:]))
             elif _slug:
-                log_lines.append(f"      📋 IGGプロフィール: アクセス不可(404) slug={_slug[:20]}")
+                # /en/creators/ 形式（2025年の正式URL）をフォールバックとして設定
+                fallback_prof = f"https://www.indiegogo.com/en/creators/{_slug}"
+                creator_websites = [fallback_prof]
+                log_lines.append(f"      📋 IGGクリエイターURL(未確認): {fallback_prof[:60]}")
                 log_area.code("\n".join(log_lines[-8:]))
 
         # IGGプロフィールページから取得したSNSリンクを事前にセット
@@ -550,6 +553,6 @@ if run:
 
 st.divider()
 st.markdown(
-    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-18u</small>",
+    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-18v</small>",
     unsafe_allow_html=True,
 )

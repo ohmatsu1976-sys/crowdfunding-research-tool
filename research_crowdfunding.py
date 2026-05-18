@@ -795,7 +795,7 @@ def _igg_profile_links(profile_url: str, maker: str = "", sess=None,
         if r.status_code != 200:
             return {}
         # リダイレクトでホームページ等に飛んだ場合はスキップ
-        if "/individuals/" not in r.url:
+        if "/individuals/" not in r.url and "/creators/" not in r.url:
             return {}
         # アクセス可能URLを記録（リンクが見つからなくても有効なURLとして保持）
         if _accessible_urls is not None:
@@ -1034,11 +1034,11 @@ def fetch_indiegogo_project(url: str) -> Optional[Dict]:
                 maker = m3.group(1)
             break
 
-        # 2d. クリエイタープロフィールリンクを探す（/individuals/xxx）
+        # 2d. クリエイタープロフィールリンクを探す（/en/creators/ または /individuals/）
         profile_url = ""
         for a in soup.find_all("a", href=True):
             href = a["href"]
-            if "/individuals/" in href:
+            if "/creators/" in href or "/individuals/" in href:
                 profile_url = href if href.startswith("http") else "https://www.indiegogo.com" + href
                 break
 
@@ -1061,14 +1061,15 @@ def fetch_indiegogo_project(url: str) -> Optional[Dict]:
             maker_slug = re.sub(r"[^a-z0-9]", "", maker.lower()) if maker else ""
             profile_candidates = []
             if creator_slug:
-                # /en/individuals/ と /individuals/ 両方試す
+                # 2025年の正しい形式: /en/creators/ を最優先
+                profile_candidates.append(f"https://www.indiegogo.com/en/creators/{creator_slug}")
                 profile_candidates.append(f"https://www.indiegogo.com/en/individuals/{creator_slug}")
                 profile_candidates.append(f"https://www.indiegogo.com/individuals/{creator_slug}")
             if profile_url:
                 profile_candidates.append(profile_url)
             if maker_slug and maker_slug not in creator_slug:
+                profile_candidates.append(f"https://www.indiegogo.com/en/creators/{maker_slug}")
                 profile_candidates.append(f"https://www.indiegogo.com/en/individuals/{maker_slug}")
-                profile_candidates.append(f"https://www.indiegogo.com/individuals/{maker_slug}")
 
             accessible_profiles: list = []
             profile_links = {}
