@@ -463,6 +463,6 @@ if run:
 
 st.divider()
 st.markdown(
-    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です</small>",
+    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-18d</small>",
     unsafe_allow_html=True,
 )
