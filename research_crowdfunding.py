@@ -740,6 +740,44 @@ def fetch_kickstarter_project(url: str) -> Optional[Dict]:
     return None
 
 
+def _igg_profile_links(profile_url: str, maker: str = "", sess=None) -> dict:
+    """Indiegogoクリエイタープロフィールページから公式サイト・SNSリンクを取得"""
+    if not profile_url:
+        return {}
+    if sess is None:
+        sess = _session()
+    _SKIP = ("indiegogo.com", "facebook.com/sharer", "twitter.com/intent",
+             "linkedin.com/share", "plus.google.com")
+    try:
+        r = sess.get(profile_url, timeout=12, allow_redirects=True)
+        if r.status_code != 200:
+            return {}
+        soup = BeautifulSoup(r.text, "html.parser")
+        links = {}
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if not href.startswith("http"):
+                continue
+            if any(s in href for s in _SKIP):
+                continue
+            if "instagram.com" in href:
+                links.setdefault("instagram", href)
+            elif "youtube.com" in href:
+                links.setdefault("youtube", href)
+            elif "facebook.com" in href:
+                links.setdefault("facebook", href)
+            elif "twitter.com" in href or "x.com" in href:
+                links.setdefault("twitter", href)
+            elif "linkedin.com" in href:
+                links.setdefault("linkedin", href)
+            else:
+                # 公式サイト（indiegogo以外の外部リンク）
+                links.setdefault("website", href)
+        return links
+    except Exception:
+        return {}
+
+
 def _parse_igg_campaign(camp: dict, url: str) -> Optional[Dict]:
     """Indiegogo キャンペーンdictからプロジェクト情報を抽出"""
     name = camp.get("title", "") or camp.get("name", "")
@@ -875,7 +913,15 @@ def fetch_indiegogo_project(url: str) -> Optional[Dict]:
                 maker = m3.group(1)
             break
 
-        # 2d. og:title / og:description で最低限の情報を返す
+        # 2d. クリエイタープロフィールリンクを探す（/individuals/xxx）
+        profile_url = ""
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if "/individuals/" in href:
+                profile_url = href if href.startswith("http") else "https://www.indiegogo.com" + href
+                break
+
+        # 2e. og:title / og:description で最低限の情報を返す
         title_tag = soup.find("meta", property="og:title")
         desc_tag  = soup.find("meta", property="og:description")
         raw_title = (title_tag.get("content", "") if title_tag else "") or ""
@@ -890,15 +936,30 @@ def fetch_indiegogo_project(url: str) -> Optional[Dict]:
                 maker = maker or by_match.group(2).strip()
             else:
                 name = clean
-            # メーカー名スラグ（ドメイン探索用）
+            # クリエイタープロフィールから公式サイト・SNSを取得
+            profile_links = _igg_profile_links(profile_url, maker, sess) if profile_url else {}
+            if not profile_links and maker:
+                # プロフィールURLが見つからない場合はメーカー名でURLを推測
+                for candidate_slug in [re.sub(r"[^a-z0-9]", "", maker.lower()),
+                                       maker.lower().replace(" ", "-")]:
+                    candidate = f"https://www.indiegogo.com/individuals/{candidate_slug}"
+                    profile_links = _igg_profile_links(candidate, maker, sess)
+                    if profile_links:
+                        break
             maker_slug = re.sub(r"[^a-z0-9]", "", maker.lower()) if maker else ""
+            creator_websites = []
+            if profile_links.get("website"):
+                creator_websites.append(profile_links["website"])
             return {
                 "platform": "Indiegogo", "name": name, "maker": maker,
                 "url": url, "raised_usd": raised,
                 "raised_jpy": int(raised * JPY_PER_USD),
                 "backers": backers, "genre": "",
                 "description": blurb, "goal_usd": 0, "country": "",
-                "_creator_slug": maker_slug,  # ドメイン探索・DuckDuckGo検索に使用
+                "_creator_slug": maker_slug,
+                "_creator_websites": creator_websites,
+                "_official_site": creator_websites[0] if creator_websites else "",
+                "_igg_profile": profile_links,  # instagram/youtube等
             }
 
     except Exception as e:
@@ -923,6 +984,21 @@ def find_creator_site(creator_slug: str, product_name: str = "") -> str:
         return ""
     sess = _session()
 
+    # ドメイン駐車・売り出しページの判定
+    _PARKING_HOSTS = (
+        "hugedomains.com", "sedo.com", "dan.com", "afternic.com",
+        "godaddy.com", "parkingcrew.net", "domainmarket.com",
+        "bodis.com", "undeveloped.com", "uniregistry.com",
+    )
+    _PARKING_PHRASES = ("is for sale", "domain for sale", "buy this domain",
+                        "this domain is for sale", "purchase this domain")
+
+    def _is_parked(resp) -> bool:
+        if any(h in resp.url for h in _PARKING_HOSTS):
+            return True
+        snippet = resp.text[:3000].lower()
+        return any(p in snippet for p in _PARKING_PHRASES)
+
     # ── 1. ドメイン直接試打（creator_slugがある場合のみ）────────────
     if creator_slug:
         extensions = [".com", ".io", ".co", ".shop", ".tech", ".ai", ".store", ".net"]
@@ -931,7 +1007,7 @@ def find_creator_site(creator_slug: str, product_name: str = "") -> str:
                 candidate = f"https://{prefix}{ext}"
                 try:
                     resp = sess.get(candidate, timeout=6, allow_redirects=True)
-                    if resp.status_code == 200 and len(resp.text) > 500:
+                    if resp.status_code == 200 and len(resp.text) > 500 and not _is_parked(resp):
                         return resp.url
                 except Exception:
                     continue

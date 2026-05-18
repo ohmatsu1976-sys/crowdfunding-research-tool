@@ -326,10 +326,13 @@ if run:
             if found:
                 creator_websites = [found]
 
-        # 全URLを試して最良の連絡先を選ぶ
+        # IGGプロフィールページから取得したSNSリンクを事前にセット
+        igg_profile = p.get("_igg_profile", {})
         contact = {
             "official_url": "", "email": "未確認", "contact_form": "未確認",
-            "facebook": "未確認", "instagram": "未確認", "linkedin": "未確認",
+            "facebook":  igg_profile.get("facebook",  "未確認"),
+            "instagram": igg_profile.get("instagram", "未確認"),
+            "linkedin":  igg_profile.get("linkedin",  "未確認"),
         }
         official_url = ""
         for site_url in creator_websites:
@@ -497,6 +500,6 @@ if run:
 
 st.divider()
 st.markdown(
-    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-18h</small>",
+    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-18i</small>",
     unsafe_allow_html=True,
 )
