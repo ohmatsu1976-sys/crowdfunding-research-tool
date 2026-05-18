@@ -495,7 +495,12 @@ if run:
                 return "🌐 公式サイト"
             if row["掲載URL"] not in ("", "未確認"):
                 plat = row.get("プラットフォーム", "")
-                return "📋 IGGページ" if plat == "Indiegogo" else "📋 KSページ"
+                if plat == "Indiegogo":
+                    return "📋 IGGページ"
+                elif plat == "ZECZEC":
+                    return "📋 ZECZECページ"
+                else:
+                    return "📋 KSページ"
             return "—"
 
         def best_contact_url(row):
@@ -566,6 +571,6 @@ if run:
 
 st.divider()
 st.markdown(
-    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-18x</small>",
+    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-18y</small>",
     unsafe_allow_html=True,
 )
