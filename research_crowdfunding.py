@@ -1280,11 +1280,11 @@ def _parse_zeczec_campaign(data: dict, url: str) -> Optional[Dict]:
 
 def fetch_zeczec_project(url: str) -> Optional[Dict]:
     """ZECZEC プロジェクトページからデータを取得"""
-    sess = _session()
-    base_url = url.rstrip("/").split("?")[0]
-
     try:
+        sess = _session()
+        base_url = url.rstrip("/").split("?")[0]
         resp = sess.get(base_url, timeout=15, allow_redirects=True)
+        print(f"  [ZECZEC] status={resp.status_code} final_url={resp.url[:60]}")
         if resp.status_code != 200:
             return None
 
@@ -1364,16 +1364,29 @@ def fetch_zeczec_project(url: str) -> Optional[Dict]:
 
 def fetch_project_from_url(url: str) -> Optional[Dict]:
     """URL から自動判定してプロジェクト情報を取得。失敗時はURLスラグで代替"""
-    if "kickstarter.com" in url:
-        result = fetch_kickstarter_project(url)
-    elif "indiegogo.com" in url:
-        result = fetch_indiegogo_project(url)
-    elif "zeczec.com" in url:
-        result = fetch_zeczec_project(url)
-    else:
-        return None
+    result = None
+    try:
+        if "kickstarter.com" in url:
+            result = fetch_kickstarter_project(url)
+        elif "indiegogo.com" in url:
+            result = fetch_indiegogo_project(url)
+        elif "zeczec.com" in url:
+            result = fetch_zeczec_project(url)
+        else:
+            return None
+    except Exception as e:
+        print(f"  [fetch_project_from_url] 例外: {type(e).__name__}: {e}")
+        result = None
+
+    if result:
+        return result
+
     # スクレイピング失敗 → URLスラグから最低限の情報を生成してClaude分析は実行する
-    return result if result else _extract_from_slug(url)
+    try:
+        return _extract_from_slug(url)
+    except Exception as e:
+        print(f"  [_extract_from_slug] 例外: {type(e).__name__}: {e}")
+        return None
 
 
 def load_urls_from_file(path: Path) -> List[str]:
