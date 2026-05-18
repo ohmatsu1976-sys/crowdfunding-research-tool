@@ -360,7 +360,10 @@ if run:
         # Claude 分析
         log_lines.append("      Claude 分析中...")
         log_area.code("\n".join(log_lines[-8:]))
-        analysis = analyze_with_claude(p, client, _sender_name, _sender_company)
+        claude_errors = []
+        analysis = analyze_with_claude(p, client, _sender_name, _sender_company, errors=claude_errors)
+        if claude_errors:
+            log_lines.append(f"      ❌ Claude エラー: {claude_errors[0][:100]}")
         priority = analysis.get("priority", "?")
         log_lines.append(f"      → 優先度: {priority}")
         log_area.code("\n".join(log_lines[-8:]))
@@ -500,6 +503,6 @@ if run:
 
 st.divider()
 st.markdown(
-    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-18j</small>",
+    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-18k</small>",
     unsafe_allow_html=True,
 )

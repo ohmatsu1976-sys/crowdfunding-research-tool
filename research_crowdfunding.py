@@ -464,7 +464,8 @@ B＝良品だが日本展開済みの可能性あり・競合多め
 C＝面白いが規制・価格・物流・競合に懸念あり"""
 
 
-def analyze_with_claude(project: Dict, client, sender_name: str = "", sender_company: str = "") -> Dict:
+def analyze_with_claude(project: Dict, client, sender_name: str = "", sender_company: str = "",
+                        errors: list = None) -> Dict:
     defaults = {
         "japanese_market_reason": "（Claude未接続のため省略）",
         "appeal_points":          "（Claude未接続のため省略）",
@@ -478,18 +479,25 @@ def analyze_with_claude(project: Dict, client, sender_name: str = "", sender_com
     if client is None:
         return defaults
 
-    prompt = _ANALYSIS_PROMPT.format(
-        name=project.get("name", ""),
-        maker=project.get("maker", ""),
-        platform=project.get("platform", ""),
-        raised_usd=project.get("raised_usd", 0),
-        raised_jpy=project.get("raised_jpy", 0),
-        backers=project.get("backers", 0),
-        genre=project.get("genre", ""),
-        url=project.get("url", ""),
-        description=str(project.get("description", ""))[:400],
-        company_profile=_build_company_profile(sender_name, sender_company),
-    )
+    try:
+        prompt = _ANALYSIS_PROMPT.format(
+            name=project.get("name", ""),
+            maker=project.get("maker", ""),
+            platform=project.get("platform", ""),
+            raised_usd=float(project.get("raised_usd", 0) or 0),
+            raised_jpy=int(project.get("raised_jpy", 0) or 0),
+            backers=int(project.get("backers", 0) or 0),
+            genre=project.get("genre", ""),
+            url=project.get("url", ""),
+            description=str(project.get("description", ""))[:400].replace("{", "｛").replace("}", "｝"),
+            company_profile=_build_company_profile(sender_name, sender_company),
+        )
+    except Exception as e:
+        msg = f"プロンプト生成エラー: {e}"
+        print(f"  [Claude] {msg}")
+        if errors is not None:
+            errors.append(msg)
+        return defaults
 
     try:
         response = client.messages.create(
@@ -502,7 +510,10 @@ def analyze_with_claude(project: Dict, client, sender_name: str = "", sender_com
         json_str = m.group(1) if m else raw[raw.find("{"):raw.rfind("}")+1]
         return {**defaults, **json.loads(json_str)}
     except Exception as e:
-        print(f"  [Claude] エラー: {e}")
+        msg = f"{type(e).__name__}: {e}"
+        print(f"  [Claude] エラー: {msg}")
+        if errors is not None:
+            errors.append(msg)
         return defaults
 
 # ───────────────────────────────────────────────────────────────────────────────
