@@ -370,6 +370,12 @@ if run:
         for site_url in creator_websites:
             if not site_url:
                 continue
+            # IGG/KSドメインはスクレイピング不要 → URLだけ保持してスキップ
+            if "indiegogo.com" in site_url or "kickstarter.com" in site_url:
+                if not official_url:
+                    official_url = site_url
+                    contact["official_url"] = site_url
+                continue
             c = get_contact_info(site_url)
             # メール or フォームが見つかった時点で確定
             if c.get("email", "未確認") != "未確認" or c.get("contact_form", "未確認") != "未確認":
@@ -471,6 +477,9 @@ if run:
                 return "📷 Instagram"
             if row["公式サイトURL"] not in ("", "未確認"):
                 return "🌐 公式サイト"
+            if row["掲載URL"] not in ("", "未確認"):
+                plat = row.get("プラットフォーム", "")
+                return "📋 IGGページ" if plat == "Indiegogo" else "📋 KSページ"
             return "—"
 
         def best_contact_url(row):
@@ -486,7 +495,8 @@ if run:
                 return row["Instagram"]
             if row["公式サイトURL"] not in ("", "未確認"):
                 return row["公式サイトURL"]
-            return ""
+            # 最終フォールバック: プロジェクトページ（必ず存在する）
+            return row.get("掲載URL", "")
 
         summary_df = df[[
             "優先度", "商品名", "メーカー名", "プラットフォーム",
@@ -540,6 +550,6 @@ if run:
 
 st.divider()
 st.markdown(
-    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-18t</small>",
+    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-18u</small>",
     unsafe_allow_html=True,
 )
