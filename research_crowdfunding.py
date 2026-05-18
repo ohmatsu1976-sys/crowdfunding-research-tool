@@ -542,44 +542,67 @@ def fetch_kickstarter_project(url: str) -> Optional[Dict]:
     product_slug = base_url.rstrip("/").split("/")[-1]
 
     # ── 1. 検索API + cloudscraper（pledged取得の最優先手段）──────────
-    search_term = " ".join(w for w in product_slug.replace("-", " ").split() if len(w) > 1)
-    search_url = (
-        "https://www.kickstarter.com/projects/search.json"
-        f"?term={requests.utils.quote(search_term)}&sort=most_funded&page=1"
-    )
     scraper = _ks_session()
+    words = [w for w in product_slug.replace("-", " ").split() if len(w) > 2]
+    # 短すぎず長すぎない検索語を複数試す（2語→3語の順）
+    search_candidates = []
+    if len(words) >= 2:
+        search_candidates.append(" ".join(words[:2]))
+    if len(words) >= 3:
+        search_candidates.append(" ".join(words[:3]))
+    if creator_slug:
+        search_candidates.append(creator_slug)
+
+    def _ks_search_match(term: str):
+        """検索APIで term を検索し creator_slug または product_slug がマッチする最初のプロジェクトを返す"""
+        try:
+            url = (
+                "https://www.kickstarter.com/projects/search.json"
+                f"?term={requests.utils.quote(term)}&sort=most_funded&page=1"
+            )
+            r = scraper.get(url, timeout=15)
+            if r.status_code != 200 or not r.text.strip():
+                return None
+            for proj in r.json().get("projects", []):
+                proj_url = (proj.get("urls", {}) or {}).get("web", {}).get("project", "")
+                if creator_slug and creator_slug in proj_url:
+                    return proj
+                if product_slug[:15] in proj_url:
+                    return proj
+        except Exception as e:
+            print(f"  [KS] 検索API エラー ({term!r}): {e}")
+        return None
+
     try:
-        resp = scraper.get(search_url, timeout=15)
-        if resp.status_code == 200 and resp.text.strip():
-            for proj in resp.json().get("projects", []):
-                proj_web_url = (proj.get("urls", {}) or {}).get("web", {}).get("project", "")
-                # creator_slug か product_slug の先頭20文字でマッチ
-                if creator_slug and creator_slug in proj_web_url:
-                    pass  # creator_slug が一致
-                elif product_slug[:20] not in proj_web_url:
-                    continue
-                pledged = float(proj.get("pledged", 0) or 0)
-                creator = (proj.get("creator", {}) or {})
-                cat     = proj.get("category", {})
-                genre   = cat.get("name", "Technology") if isinstance(cat, dict) else "Technology"
-                # proj_web_url はフルURL（https://...）のためそのまま使用
-                final_url = proj_web_url if proj_web_url.startswith("http") else base_url
-                return {
-                    "platform":      "Kickstarter",
-                    "name":          proj.get("name", ""),
-                    "maker":         creator.get("name", creator_slug),
-                    "url":           final_url,
-                    "raised_usd":    pledged,
-                    "raised_jpy":    int(pledged * JPY_PER_USD),
-                    "backers":       int(proj.get("backers_count", 0) or 0),
-                    "genre":         genre,
-                    "description":   proj.get("blurb", ""),
-                    "goal_usd":      float(proj.get("goal", 0) or 0),
-                    "country":       proj.get("country", ""),
-                    "_creator_slug": creator_slug,
-                }
+        matched = None
+        for term in search_candidates:
+            matched = _ks_search_match(term)
+            if matched:
+                break
+        if matched:
+            proj = matched
+            proj_web_url = (proj.get("urls", {}) or {}).get("web", {}).get("project", "")
+            pledged = float(proj.get("pledged", 0) or 0)
+            creator = (proj.get("creator", {}) or {})
+            cat     = proj.get("category", {})
+            genre   = cat.get("name", "Technology") if isinstance(cat, dict) else "Technology"
+            final_url = proj_web_url if proj_web_url.startswith("http") else base_url
+            return {
+                "platform":      "Kickstarter",
+                "name":          proj.get("name", ""),
+                "maker":         creator.get("name", creator_slug),
+                "url":           final_url,
+                "raised_usd":    pledged,
+                "raised_jpy":    int(pledged * JPY_PER_USD),
+                "backers":       int(proj.get("backers_count", 0) or 0),
+                "genre":         genre,
+                "description":   proj.get("blurb", ""),
+                "goal_usd":      float(proj.get("goal", 0) or 0),
+                "country":       proj.get("country", ""),
+                "_creator_slug": creator_slug,
+            }
     except Exception as e:
-        print(f"  [KS] 検索API エラー: {e}")
+        print(f"  [KS] 検索マッチ エラー: {e}")
 
     # ── 2. cloudscraperでHTMLスクレイピング（フォールバック）────────
     scraper = _ks_session()
