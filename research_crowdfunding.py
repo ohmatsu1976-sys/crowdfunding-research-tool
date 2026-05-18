@@ -566,9 +566,15 @@ def fetch_kickstarter_project(url: str) -> Optional[Dict]:
                 return None
             for proj in r.json().get("projects", []):
                 proj_url = (proj.get("urls", {}) or {}).get("web", {}).get("project", "")
+                # creator_slug（文字列・数値ID両方）でマッチ
                 if creator_slug and creator_slug in proj_url:
                     return proj
-                if product_slug[:15] in proj_url:
+                # product_slug の先頭15文字でマッチ
+                if product_slug[:15] and product_slug[:15] in proj_url:
+                    return proj
+                # creator のID（数値）がURLに含まれているかチェック
+                creator_id = str((proj.get("creator", {}) or {}).get("id", ""))
+                if creator_id and creator_id in proj_url and product_slug[:10] in proj_url:
                     return proj
         except Exception as e:
             print(f"  [KS] 検索API エラー ({term!r}): {e}")
@@ -611,10 +617,14 @@ def fetch_kickstarter_project(url: str) -> Optional[Dict]:
             final_url = proj_web_url if proj_web_url.startswith("http") else base_url
             # プロジェクトページから creator.websites を全件取得
             creator_websites = _ks_creator_websites(final_url)
+            # 数値IDはmaker名として不適切なので除外
+            maker_name = creator.get("name", "") or creator_slug
+            if str(maker_name).isdigit():
+                maker_name = creator_slug
             return {
                 "platform":           "Kickstarter",
                 "name":               proj.get("name", ""),
-                "maker":              creator.get("name", creator_slug),
+                "maker":              maker_name,
                 "url":                final_url,
                 "raised_usd":         pledged,
                 "raised_jpy":         int(pledged * JPY_PER_USD),
@@ -644,30 +654,39 @@ def fetch_kickstarter_project(url: str) -> Optional[Dict]:
         for tag in soup.find_all(attrs={"data-initial": True}):
             try:
                 data = json.loads(tag["data-initial"])
-                proj = data.get("project", data)
-                name = proj.get("name", "")
-                if not name:
+                # "project" キーが dict として存在するものだけ使用（creator profileなど他要素を除外）
+                proj = data.get("project")
+                if not isinstance(proj, dict) or not proj.get("name"):
                     continue
+                name = proj["name"]
                 pledged_raw = proj.get("pledged", {})
-                pledged = float(pledged_raw.get("amount", 0) if isinstance(pledged_raw, dict) else (pledged_raw or 0))
+                if isinstance(pledged_raw, dict):
+                    pledged = float(pledged_raw.get("amount", 0) or 0)
+                else:
+                    pledged = float(pledged_raw or 0)
                 creator_data = proj.get("creator", {}) or {}
-                maker = creator_data.get("name", creator_slug)
+                maker = creator_data.get("name", "") or creator_slug
+                # 数値IDはmaker名として不適切なので除外
+                if str(maker).isdigit():
+                    maker = creator_slug
                 websites = creator_data.get("websites", [])
                 official_site = websites[0].get("url", "") if isinstance(websites, list) and websites else ""
+                creator_websites = [w.get("url", "") for w in websites if isinstance(w, dict) and w.get("url")] if isinstance(websites, list) else []
                 return {
-                    "platform":       "Kickstarter",
-                    "name":           name,
-                    "maker":          maker,
-                    "url":            final_url,
-                    "raised_usd":     pledged,
-                    "raised_jpy":     int(pledged * JPY_PER_USD),
-                    "backers":        int(proj.get("backersCount", 0) or 0),
-                    "genre":          "Technology",
-                    "description":    proj.get("description", ""),
-                    "goal_usd":       0,
-                    "country":        "",
-                    "_creator_slug":  creator_slug,
-                    "_official_site": official_site,
+                    "platform":          "Kickstarter",
+                    "name":              name,
+                    "maker":             maker,
+                    "url":               final_url,
+                    "raised_usd":        pledged,
+                    "raised_jpy":        int(pledged * JPY_PER_USD),
+                    "backers":           int(proj.get("backersCount", 0) or 0),
+                    "genre":             "Technology",
+                    "description":       proj.get("description", ""),
+                    "goal_usd":          0,
+                    "country":           "",
+                    "_creator_slug":     creator_slug,
+                    "_official_site":    official_site,
+                    "_creator_websites": creator_websites,
                 }
             except Exception:
                 continue
