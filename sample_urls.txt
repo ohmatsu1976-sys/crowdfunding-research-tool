@@ -1,0 +1,8 @@
+# 海外クラファン商品リサーチ URLリスト
+# 1行1URL。Kickstarter または Indiegogo のプロジェクトURLを貼り付けてください。
+# #で始まる行はコメントとして無視されます。
+
+# ── サンプル（実際のURLに差し替えてください）──
+https://www.kickstarter.com/projects/bogietech/mobi-the-next-evolution-in-portable-handheld-projectors
+https://www.kickstarter.com/projects/icebreaker/icebreaker-portable-ice-maker
+https://www.indiegogo.com/projects/moft-snap-phone-stand-wallet

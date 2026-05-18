@@ -1,0 +1,12 @@
+# APIキー（絶対にGitHubに上げない）
+.streamlit/secrets.toml
+
+# 出力ファイル
+output/
+
+# テスト・一時ファイル
+test_*.py
+__pycache__/
+*.pyc
+*.pyo
+.env
