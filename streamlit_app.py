@@ -363,7 +363,7 @@ if run:
                 return "📷 Instagram"
             if row["公式サイトURL"] not in ("", "未確認"):
                 return "🌐 公式サイト"
-            return "📦 KS経由"
+            return "—"
 
         def best_contact_url(row):
             if row["メールアドレス"] not in ("未確認", ""):
@@ -378,7 +378,7 @@ if run:
                 return row["Instagram"]
             if row["公式サイトURL"] not in ("", "未確認"):
                 return row["公式サイトURL"]
-            return row["掲載URL"]  # 最終フォールバック: Kickstarter URL
+            return ""
 
         summary_df = df[[
             "優先度", "商品名", "メーカー名", "プラットフォーム",
@@ -412,7 +412,7 @@ if run:
                     st.markdown(f"**{row['商品名']}** — {row['メーカー名']}")
                     st.markdown(f"To: `{row['メールアドレス']}`")
                     st.markdown(f"Subject: {row['営業メール件名(英語)']}")
-                    st.text(row["営業メール本文(英語)"])
+                    st.markdown(row["営業メール本文(英語)"].replace("\n", "  \n"))
                     st.divider()
 
         # CSV ダウンロード
