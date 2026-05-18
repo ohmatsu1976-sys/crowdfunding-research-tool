@@ -1037,22 +1037,29 @@ def find_creator_site(creator_slug: str, product_name: str = "") -> str:
         "facebook.com", "instagram.com", "twitter.com", "x.com",
         "youtube.com", "linkedin.com", "tiktok.com",
     )
-    query = f"{product_name or creator_slug} official site"
-    try:
-        ddg_url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}"
-        resp = sess.get(ddg_url, timeout=12)
-        if resp.status_code == 200:
+    # メーカー名（スラグ）で先に検索、次に商品名で検索
+    queries = []
+    if creator_slug:
+        queries.append(f"{creator_slug} official site")
+    if product_name:
+        queries.append(f"{product_name} official site")
+
+    for query in queries:
+        try:
+            ddg_url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}"
+            resp = sess.get(ddg_url, timeout=12)
+            if resp.status_code != 200:
+                continue
             soup = BeautifulSoup(resp.text, "html.parser")
             for a in soup.select(".result__a"):
                 href = a.get("href", "")
-                # DDGリダイレクトURL から実URLを抽出
                 uddg = re.search(r"uddg=([^&]+)", href)
                 if uddg:
                     href = requests.utils.unquote(uddg.group(1))
                 if href.startswith("http") and not any(s in href for s in _SKIP_DOMAINS):
                     return href
-    except Exception:
-        pass
+        except Exception:
+            continue
 
     return ""
 
