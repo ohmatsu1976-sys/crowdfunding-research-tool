@@ -332,7 +332,7 @@ if run:
                 log_lines.append(f"      🌐 公式サイト取得: {found_list[0][:50]}")
                 log_area.code("\n".join(log_lines[-8:]))
 
-        # 優先3: DuckDuckGo検索（creator_slugまたは商品名で検索）
+        # 優先3: DuckDuckGo検索（creator_slug・メーカー名・商品名で検索）
         _slug = p.get("_creator_slug", "")
         _pname = p.get("name", "")
         _maker = p.get("maker", "")
@@ -341,18 +341,22 @@ if run:
         if not creator_websites and (_slug or _pname or _maker):
             log_lines.append(f"      🔍 DDG検索: slug={_slug[:20]!r} maker={_maker[:20]!r}")
             log_area.code("\n".join(log_lines[-8:]))
-            found = find_creator_site(_slug, _pname)
+            found = find_creator_site(_slug, _pname, _maker)
             log_lines.append(f"      🔍 DDG結果: {found[:50] if found else 'なし'}")
             log_area.code("\n".join(log_lines[-8:]))
             if found:
                 creator_websites = [found]
 
-        # 優先4 (IGGのみ): クリエイタープロフィールURLをフォールバックとして使用
-        if not creator_websites and p.get("platform") == "Indiegogo" and _slug:
-            igg_profile_fallback = f"https://www.indiegogo.com/individuals/{_slug}"
-            creator_websites = [igg_profile_fallback]
-            log_lines.append(f"      📋 IGGプロフィール使用: {_slug}")
-            log_area.code("\n".join(log_lines[-8:]))
+        # 優先4 (IGGのみ): 検証済みプロフィールURLをフォールバックとして使用
+        if not creator_websites and p.get("platform") == "Indiegogo":
+            valid_prof = p.get("_valid_profile_url", "")
+            if valid_prof:
+                creator_websites = [valid_prof]
+                log_lines.append(f"      📋 IGGプロフィール(確認済): {valid_prof[:50]}")
+                log_area.code("\n".join(log_lines[-8:]))
+            elif _slug:
+                log_lines.append(f"      📋 IGGプロフィール: アクセス不可(404) slug={_slug[:20]}")
+                log_area.code("\n".join(log_lines[-8:]))
 
         # IGGプロフィールページから取得したSNSリンクを事前にセット
         igg_profile = p.get("_igg_profile", {})
@@ -536,6 +540,6 @@ if run:
 
 st.divider()
 st.markdown(
-    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-18r</small>",
+    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-18s</small>",
     unsafe_allow_html=True,
 )

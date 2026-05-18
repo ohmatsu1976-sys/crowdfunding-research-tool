@@ -779,7 +779,8 @@ def _categorize_link(href: str, links: dict, skip: tuple) -> None:
         links.setdefault("website", href)
 
 
-def _igg_profile_links(profile_url: str, maker: str = "", sess=None) -> dict:
+def _igg_profile_links(profile_url: str, maker: str = "", sess=None,
+                       _accessible_urls: list = None) -> dict:
     """Indiegogoクリエイタープロフィールページから公式サイト・SNSリンクを取得
     Next.js SPAのため<a>タグだけでなく__NEXT_DATA__とscriptタグ内JSONも解析する
     """
@@ -796,6 +797,9 @@ def _igg_profile_links(profile_url: str, maker: str = "", sess=None) -> dict:
         # リダイレクトでホームページ等に飛んだ場合はスキップ
         if "/individuals/" not in r.url:
             return {}
+        # アクセス可能URLを記録（リンクが見つからなくても有効なURLとして保持）
+        if _accessible_urls is not None:
+            _accessible_urls.append(r.url)
         soup = BeautifulSoup(r.text, "html.parser")
         links = {}
 
@@ -1044,15 +1048,20 @@ def fetch_indiegogo_project(url: str) -> Optional[Dict]:
             maker_slug = re.sub(r"[^a-z0-9]", "", maker.lower()) if maker else ""
             profile_candidates = []
             if creator_slug:
+                # /en/individuals/ と /individuals/ 両方試す
+                profile_candidates.append(f"https://www.indiegogo.com/en/individuals/{creator_slug}")
                 profile_candidates.append(f"https://www.indiegogo.com/individuals/{creator_slug}")
             if profile_url:
                 profile_candidates.append(profile_url)
             if maker_slug and maker_slug not in creator_slug:
+                profile_candidates.append(f"https://www.indiegogo.com/en/individuals/{maker_slug}")
                 profile_candidates.append(f"https://www.indiegogo.com/individuals/{maker_slug}")
 
+            accessible_profiles: list = []
             profile_links = {}
             for pc in profile_candidates:
-                profile_links = _igg_profile_links(pc, maker, sess)
+                profile_links = _igg_profile_links(pc, maker, sess,
+                                                   _accessible_urls=accessible_profiles)
                 if profile_links:
                     break
 
@@ -1061,6 +1070,8 @@ def fetch_indiegogo_project(url: str) -> Optional[Dict]:
             creator_websites = []
             if profile_links.get("website"):
                 creator_websites.append(profile_links["website"])
+            # アクセス可能だったプロフィールURL（リンクは取れなくても有効なURLとして保持）
+            valid_profile_url = accessible_profiles[0] if accessible_profiles else ""
             return {
                 "platform": "Indiegogo", "name": name, "maker": maker,
                 "url": url, "raised_usd": raised,
@@ -1071,6 +1082,7 @@ def fetch_indiegogo_project(url: str) -> Optional[Dict]:
                 "_creator_websites": creator_websites,
                 "_official_site": creator_websites[0] if creator_websites else "",
                 "_igg_profile": profile_links,
+                "_valid_profile_url": valid_profile_url,
             }
 
     except Exception as e:
@@ -1089,9 +1101,10 @@ def _extract_creator_from_ks_url(url: str) -> str:
     return ""
 
 
-def find_creator_site(creator_slug: str, product_name: str = "") -> str:
-    """クリエイタースラグ・商品名から公式サイトを探す"""
-    if not creator_slug and not product_name:
+def find_creator_site(creator_slug: str, product_name: str = "",
+                      maker_name: str = "") -> str:
+    """クリエイタースラグ・商品名・メーカー名から公式サイトを探す"""
+    if not creator_slug and not product_name and not maker_name:
         return ""
     sess = _session()
 
@@ -1123,35 +1136,50 @@ def find_creator_site(creator_slug: str, product_name: str = "") -> str:
                 except Exception:
                     continue
 
-    # ── 2. DuckDuckGo HTMLスクレイピングで検索 ──────────────────────
+    # ── 2. DuckDuckGo 検索（html + lite 両エンドポイント）────────────
     _SKIP_DOMAINS = (
         "kickstarter.com", "indiegogo.com", "amazon.", "wikipedia.",
         "facebook.com", "instagram.com", "twitter.com", "x.com",
         "youtube.com", "linkedin.com", "tiktok.com",
     )
-    # メーカー名（スラグ）で先に検索、次に商品名で検索
+    # クリエイタースラグ→メーカー名→商品名の順で検索
     queries = []
     if creator_slug:
         queries.append(f"{creator_slug} official site")
+    if maker_name:
+        queries.append(f"{maker_name} official site")
     if product_name:
         queries.append(f"{product_name} official site")
 
     for query in queries:
+        encoded = requests.utils.quote(query)
+
+        # Approach A: html.duckduckgo.com（uddgエンコードされたURL）
         try:
-            ddg_url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(query)}"
-            resp = sess.get(ddg_url, timeout=12)
-            if resp.status_code != 200:
-                continue
-            soup = BeautifulSoup(resp.text, "html.parser")
-            for a in soup.select(".result__a"):
-                href = a.get("href", "")
-                uddg = re.search(r"uddg=([^&]+)", href)
-                if uddg:
-                    href = requests.utils.unquote(uddg.group(1))
-                if href.startswith("http") and not any(s in href for s in _SKIP_DOMAINS):
-                    return href
+            resp = sess.get(f"https://html.duckduckgo.com/html/?q={encoded}", timeout=12)
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, "html.parser")
+                for a in soup.select(".result__a"):
+                    href = a.get("href", "")
+                    uddg = re.search(r"uddg=([^&]+)", href)
+                    if uddg:
+                        href = requests.utils.unquote(uddg.group(1))
+                    if href.startswith("http") and not any(s in href for s in _SKIP_DOMAINS):
+                        return href
         except Exception:
-            continue
+            pass
+
+        # Approach B: lite.duckduckgo.com（シンプルHTML、AWSでも動く可能性あり）
+        try:
+            resp = sess.get(f"https://lite.duckduckgo.com/lite/?q={encoded}", timeout=12)
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, "html.parser")
+                for a in soup.find_all("a", href=True):
+                    href = a["href"]
+                    if href.startswith("http") and not any(s in href for s in _SKIP_DOMAINS):
+                        return href
+        except Exception:
+            pass
 
     return ""
 
