@@ -499,22 +499,30 @@ def analyze_with_claude(project: Dict, client, sender_name: str = "", sender_com
             errors.append(msg)
         return defaults
 
-    try:
-        response = client.messages.create(
-            model=MODEL_ID,
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = response.content[0].text.strip()
-        m = re.search(r"```json\s*([\s\S]+?)\s*```", raw)
-        json_str = m.group(1) if m else raw[raw.find("{"):raw.rfind("}")+1]
-        return {**defaults, **json.loads(json_str)}
-    except Exception as e:
-        msg = f"{type(e).__name__}: {e}"
-        print(f"  [Claude] エラー: {msg}")
-        if errors is not None:
-            errors.append(msg)
-        return defaults
+    last_err = None
+    for attempt in range(3):
+        try:
+            response = client.messages.create(
+                model=MODEL_ID,
+                max_tokens=1024,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = response.content[0].text.strip()
+            m = re.search(r"```json\s*([\s\S]+?)\s*```", raw)
+            json_str = m.group(1) if m else raw[raw.find("{"):raw.rfind("}")+1]
+            return {**defaults, **json.loads(json_str)}
+        except Exception as e:
+            last_err = e
+            is_overload = "529" in str(e) or "overloaded" in str(e).lower()
+            if is_overload and attempt < 2:
+                time.sleep(15)
+                continue
+            break
+    msg = f"{type(last_err).__name__}: {last_err}"
+    print(f"  [Claude] エラー: {msg}")
+    if errors is not None:
+        errors.append(msg)
+    return defaults
 
 # ───────────────────────────────────────────────────────────────────────────────
 # CSV 出力定義

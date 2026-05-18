@@ -250,17 +250,32 @@ if run:
         st.error("anthropic パッケージがインストールされていません: pip install anthropic")
         st.stop()
 
-    # Claude API 接続テスト（エラーを可視化）
+    # Claude API 接続テスト（過負荷時は最大3回リトライ）
     with st.spinner("Claude API 接続確認中..."):
-        try:
-            _test = client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=10,
-                messages=[{"role": "user", "content": "hi"}],
-            )
-        except Exception as _e:
-            st.error(f"⚠️ Claude API 接続エラー: {_e}")
-            st.caption("Streamlit Cloud の Secrets に ANTHROPIC_API_KEY が正しく設定されているか確認してください。")
+        _last_err = None
+        for _attempt in range(3):
+            try:
+                client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=10,
+                    messages=[{"role": "user", "content": "hi"}],
+                )
+                _last_err = None
+                break
+            except Exception as _e:
+                _last_err = _e
+                _is_overload = "529" in str(_e) or "overloaded" in str(_e).lower()
+                if _is_overload and _attempt < 2:
+                    time.sleep(10)
+                else:
+                    break
+        if _last_err:
+            _is_overload = "529" in str(_last_err) or "overloaded" in str(_last_err).lower()
+            if _is_overload:
+                st.warning("⚠️ Claude API が一時的に混雑しています。少し待ってから再度「▶ リサーチ開始」を押してください。")
+            else:
+                st.error(f"⚠️ Claude API 接続エラー: {_last_err}")
+                st.caption("Streamlit Cloud の Secrets に ANTHROPIC_API_KEY が正しく設定されているか確認してください。")
             st.stop()
 
     # 送信者情報をsession_stateに保持してClaude分析に渡す
@@ -503,6 +518,6 @@ if run:
 
 st.divider()
 st.markdown(
-    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-18k</small>",
+    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-18l</small>",
     unsafe_allow_html=True,
 )
