@@ -876,6 +876,11 @@ def fetch_indiegogo_project(url: str) -> Optional[Dict]:
     # ── 2. HTMLスクレイピング ────────────────────────────────────────
     try:
         resp = sess.get(url, timeout=15)
+        # リダイレクト後のURLから creator_slug を再取得（新形式URLへのリダイレクト対応）
+        if resp.url and resp.url != url:
+            _, redirected_creator = _extract_igg_slugs(resp.url)
+            if redirected_creator:
+                creator_slug = redirected_creator
         if resp.status_code != 200:
             return None
         html = resp.text
