@@ -73,11 +73,11 @@ with st.sidebar:
 - [最多調達（Design）](https://www.indiegogo.com/explore/design#/?sort=most_funded&project_type=campaign)
 """)
 
-    st.markdown("### ZECZEC")
+    st.markdown("### ZECZEC（嘖嘖・台湾）")
     st.markdown("""
-- [人気プロジェクト](https://zeczec.com/discover)
-- [新着プロジェクト](https://zeczec.com/campaigns?sort=newest)
-- [資金調達額TOP](https://zeczec.com/campaigns?sort=collected_amount)
+- [トップページ](https://www.zeczec.com/)
+- [テクノロジー](https://www.zeczec.com/categories/technology)
+- [デザイン](https://www.zeczec.com/categories/design)
 """)
 
     st.divider()
@@ -571,6 +571,6 @@ if run:
 
 st.divider()
 st.markdown(
-    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-18y</small>",
+    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-18z</small>",
     unsafe_allow_html=True,
 )
