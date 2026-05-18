@@ -284,22 +284,52 @@ if run:
             log_lines.append(f"      ✅ 商品名: {p.get('name','')[:40]}")
 
         # 公式サイト・連絡先
-        official_url = find_official_site(p["url"], p["maker"])
-        if not official_url and p.get("_creator_slug"):
+        # 優先1: KSプロジェクトページの creator.websites（複数URLを全試行）
+        creator_websites = p.get("_creator_websites", [])
+        if p.get("_official_site") and p["_official_site"] not in creator_websites:
+            creator_websites = [p["_official_site"]] + creator_websites
+
+        # 優先2: プロジェクトページのリンクから
+        if not creator_websites:
+            official_url = find_official_site(p["url"], p["maker"])
+            if official_url:
+                creator_websites = [official_url]
+
+        # 優先3: DuckDuckGo検索
+        if not creator_websites and p.get("_creator_slug"):
             log_lines.append(f"      🔍 公式サイト検索中: {p['_creator_slug']}")
             log_area.code("\n".join(log_lines[-8:]))
-            official_url = find_creator_site(p["_creator_slug"], p.get("name", ""))
+            found = find_creator_site(p["_creator_slug"], p.get("name", ""))
+            if found:
+                creator_websites = [found]
+
+        # 全URLを試して最良の連絡先を選ぶ
+        contact = {
+            "official_url": "", "email": "未確認", "contact_form": "未確認",
+            "facebook": "未確認", "instagram": "未確認", "linkedin": "未確認",
+        }
+        official_url = ""
+        for site_url in creator_websites:
+            if not site_url:
+                continue
+            c = get_contact_info(site_url)
+            # メール or フォームが見つかった時点で確定
+            if c.get("email", "未確認") != "未確認" or c.get("contact_form", "未確認") != "未確認":
+                contact = c
+                official_url = site_url
+                break
+            # SNSしか見つからない場合も候補として保持
+            if official_url == "":
+                contact = c
+                official_url = site_url
+        if not official_url and creator_websites:
+            official_url = creator_websites[0]
+            contact["official_url"] = official_url
+
         if official_url:
             log_lines.append(f"      🌐 公式サイト: {official_url[:50]}")
-            contact = get_contact_info(official_url)
-            email = contact.get("email", "未確認")
-            if email != "未確認":
-                log_lines.append(f"      📧 メール: {email}")
-        else:
-            contact = {
-                "official_url": "", "email": "未確認", "contact_form": "未確認",
-                "facebook": "未確認", "instagram": "未確認", "linkedin": "未確認",
-            }
+            if contact.get("email", "未確認") != "未確認":
+                log_lines.append(f"      📧 メール: {contact['email']}")
 
         # Claude 分析
         log_lines.append("      Claude 分析中...")

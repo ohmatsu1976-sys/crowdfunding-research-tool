@@ -308,9 +308,13 @@ def get_contact_info(official_url: str) -> Dict:
 
         # メールアドレス抽出
         emails = re.findall(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", text)
+        _BAD_EMAIL_KW = [
+            "noreply", "no-reply", "example", "test", "privacy",
+            "sentry", "wix", "kickofflabs", "mailchimp", "sendgrid",
+            "klaviyo", "hubspot", "zendesk",
+        ]
         for email in emails:
-            if not any(kw in email.lower() for kw in ["noreply", "no-reply", "example", "test",
-                                                        "privacy", "support@sentry", "wix"]):
+            if not any(kw in email.lower() for kw in _BAD_EMAIL_KW):
                 info["email"] = email
                 break
 
@@ -344,10 +348,7 @@ def get_contact_info(official_url: str) -> Dict:
                         sub_resp.text
                     )
                     for email in sub_emails:
-                        if not any(kw in email.lower() for kw in [
-                            "noreply", "no-reply", "example", "test",
-                            "privacy", "sentry", "wix", "shopify", ".png",
-                        ]):
+                        if not any(kw in email.lower() for kw in _BAD_EMAIL_KW + ["shopify", ".png"]):
                             info["email"] = email
                             break
 
@@ -573,6 +574,27 @@ def fetch_kickstarter_project(url: str) -> Optional[Dict]:
             print(f"  [KS] 検索API エラー ({term!r}): {e}")
         return None
 
+    def _ks_creator_websites(page_url: str) -> list:
+        """プロジェクトページの data-initial から creator.websites を全件取得して返す"""
+        try:
+            r = scraper.get(page_url, timeout=15, allow_redirects=True)
+            if r.status_code != 200:
+                return []
+            soup = BeautifulSoup(r.text, "html.parser")
+            for tag in soup.find_all(attrs={"data-initial": True}):
+                try:
+                    data = json.loads(tag["data-initial"])
+                    proj_data = data.get("project", data)
+                    creator_data = proj_data.get("creator", {}) or {}
+                    websites = creator_data.get("websites", [])
+                    if isinstance(websites, list):
+                        return [w.get("url", "") for w in websites if w.get("url")]
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return []
+
     try:
         matched = None
         for term in search_candidates:
@@ -587,19 +609,23 @@ def fetch_kickstarter_project(url: str) -> Optional[Dict]:
             cat     = proj.get("category", {})
             genre   = cat.get("name", "Technology") if isinstance(cat, dict) else "Technology"
             final_url = proj_web_url if proj_web_url.startswith("http") else base_url
+            # プロジェクトページから creator.websites を全件取得
+            creator_websites = _ks_creator_websites(final_url)
             return {
-                "platform":      "Kickstarter",
-                "name":          proj.get("name", ""),
-                "maker":         creator.get("name", creator_slug),
-                "url":           final_url,
-                "raised_usd":    pledged,
-                "raised_jpy":    int(pledged * JPY_PER_USD),
-                "backers":       int(proj.get("backers_count", 0) or 0),
-                "genre":         genre,
-                "description":   proj.get("blurb", ""),
-                "goal_usd":      float(proj.get("goal", 0) or 0),
-                "country":       proj.get("country", ""),
-                "_creator_slug": creator_slug,
+                "platform":           "Kickstarter",
+                "name":               proj.get("name", ""),
+                "maker":              creator.get("name", creator_slug),
+                "url":                final_url,
+                "raised_usd":         pledged,
+                "raised_jpy":         int(pledged * JPY_PER_USD),
+                "backers":            int(proj.get("backers_count", 0) or 0),
+                "genre":              genre,
+                "description":        proj.get("blurb", ""),
+                "goal_usd":           float(proj.get("goal", 0) or 0),
+                "country":            proj.get("country", ""),
+                "_creator_slug":      creator_slug,
+                "_creator_websites":  creator_websites,  # 複数URLリスト
+                "_official_site":     creator_websites[0] if creator_websites else "",
             }
     except Exception as e:
         print(f"  [KS] 検索マッチ エラー: {e}")
@@ -624,13 +650,24 @@ def fetch_kickstarter_project(url: str) -> Optional[Dict]:
                     continue
                 pledged_raw = proj.get("pledged", {})
                 pledged = float(pledged_raw.get("amount", 0) if isinstance(pledged_raw, dict) else (pledged_raw or 0))
+                creator_data = proj.get("creator", {}) or {}
+                maker = creator_data.get("name", creator_slug)
+                websites = creator_data.get("websites", [])
+                official_site = websites[0].get("url", "") if isinstance(websites, list) and websites else ""
                 return {
-                    "platform": "Kickstarter", "name": name, "maker": creator_slug,
-                    "url": final_url, "raised_usd": pledged,
-                    "raised_jpy": int(pledged * JPY_PER_USD),
-                    "backers": int(proj.get("backersCount", 0) or 0),
-                    "genre": "Technology", "description": proj.get("description", ""),
-                    "goal_usd": 0, "country": "", "_creator_slug": creator_slug,
+                    "platform":       "Kickstarter",
+                    "name":           name,
+                    "maker":          maker,
+                    "url":            final_url,
+                    "raised_usd":     pledged,
+                    "raised_jpy":     int(pledged * JPY_PER_USD),
+                    "backers":        int(proj.get("backersCount", 0) or 0),
+                    "genre":          "Technology",
+                    "description":    proj.get("description", ""),
+                    "goal_usd":       0,
+                    "country":        "",
+                    "_creator_slug":  creator_slug,
+                    "_official_site": official_site,
                 }
             except Exception:
                 continue
