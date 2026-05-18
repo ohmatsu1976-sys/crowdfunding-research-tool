@@ -295,11 +295,13 @@ if run:
         if p.get("_official_site") and p["_official_site"] not in creator_websites:
             creator_websites = [p["_official_site"]] + creator_websites
 
-        # 優先2: プロジェクトページのリンクから
+        # 優先2: プロジェクトページのリンクから（cloudscraperでKS対応）
         if not creator_websites:
-            official_url = find_official_site(p["url"], p["maker"])
-            if official_url:
-                creator_websites = [official_url]
+            found_list = find_official_site(p["url"], p["maker"])
+            if found_list:
+                creator_websites = found_list
+                log_lines.append(f"      🌐 公式サイト取得: {found_list[0][:50]}")
+                log_area.code("\n".join(log_lines[-8:]))
 
         # 優先3: DuckDuckGo検索
         if not creator_websites and p.get("_creator_slug"):

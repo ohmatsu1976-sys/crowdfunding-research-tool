@@ -249,19 +249,40 @@ def search_indiegogo(limit: int = 20) -> List[Dict]:
 # 公式サイト URL を探す
 # ───────────────────────────────────────────────────────────────────────────────
 
-def find_official_site(project_url: str, maker_name: str) -> str:
-    """クラファンページからメーカー公式サイト URL を探す"""
+def find_official_site(project_url: str, maker_name: str) -> list:
+    """クラファンページからメーカー公式サイト URL リストを返す（複数対応）"""
     if not project_url.startswith("http"):
-        return ""
+        return []
+
+    # KickstarterはCloudflare対策のためcloudscraperを使用
+    is_ks = "kickstarter.com" in project_url
+    scraper = _ks_session() if is_ks else _session()
+
     try:
-        sess = _session()
-        resp = sess.get(project_url, timeout=12)
+        resp = scraper.get(project_url, timeout=15, allow_redirects=True)
         if resp.status_code != 200:
-            return ""
+            return []
 
         soup = BeautifulSoup(resp.text, "html.parser")
-        maker_word = maker_name.lower().split()[0] if maker_name else ""
 
+        # KS: data-initial の creator.websites が最も信頼性が高い
+        if is_ks:
+            for tag in soup.find_all(attrs={"data-initial": True}):
+                try:
+                    data = json.loads(tag["data-initial"])
+                    proj = data.get("project")
+                    if not isinstance(proj, dict):
+                        continue
+                    creator_data = proj.get("creator", {}) or {}
+                    websites = creator_data.get("websites", [])
+                    if isinstance(websites, list) and websites:
+                        return [w.get("url", "") for w in websites if w.get("url")]
+                except Exception:
+                    continue
+
+        # Aタグから外部リンクを探す（IGG・KSのフォールバック）
+        maker_word = maker_name.lower().split()[0] if maker_name else ""
+        found = []
         for a in soup.find_all("a", href=True):
             href = a["href"]
             if not href.startswith("http"):
@@ -273,12 +294,12 @@ def find_official_site(project_url: str, maker_name: str) -> str:
             link_text = a.get_text(strip=True).lower()
             if any(kw in link_text or kw in href.lower()
                    for kw in ["website", "official", "learn more", "visit us", maker_word]):
-                return href
+                found.append(href)
+        return found[:3]
 
-        time.sleep(API_WAIT_SEC)
     except Exception:
         pass
-    return ""
+    return []
 
 # ───────────────────────────────────────────────────────────────────────────────
 # 連絡先取得
