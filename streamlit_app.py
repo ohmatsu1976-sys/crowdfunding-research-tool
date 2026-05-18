@@ -76,8 +76,9 @@ with st.sidebar:
     st.markdown("### ZECZEC（嘖嘖・台湾）")
     st.markdown("""
 - [トップページ](https://www.zeczec.com/)
-- [テクノロジー](https://www.zeczec.com/categories/technology)
-- [デザイン](https://www.zeczec.com/categories/design)
+
+トップページ上部の「**探索**」メニューから
+カテゴリ一覧を選択してください。
 """)
 
     st.divider()
@@ -571,6 +572,6 @@ if run:
 
 st.divider()
 st.markdown(
-    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-18z</small>",
+    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-19a</small>",
     unsafe_allow_html=True,
 )
