@@ -333,11 +333,16 @@ if run:
                 log_area.code("\n".join(log_lines[-8:]))
 
         # 優先3: DuckDuckGo検索（creator_slugまたは商品名で検索）
-        if not creator_websites and (p.get("_creator_slug") or p.get("name")):
-            search_label = p.get("_creator_slug") or p.get("name", "")
-            log_lines.append(f"      🔍 公式サイト検索中: {search_label[:40]}")
+        _slug = p.get("_creator_slug", "")
+        _pname = p.get("name", "")
+        log_lines.append(f"      🔎 slug={_slug[:30]} websites={len(creator_websites)}")
+        log_area.code("\n".join(log_lines[-8:]))
+        if not creator_websites and (_slug or _pname):
+            log_lines.append(f"      🔍 DDG検索: {_slug[:30] or _pname[:30]}")
             log_area.code("\n".join(log_lines[-8:]))
-            found = find_creator_site(p.get("_creator_slug", ""), p.get("name", ""))
+            found = find_creator_site(_slug, _pname)
+            log_lines.append(f"      🔍 DDG結果: {found[:50] if found else 'なし'}")
+            log_area.code("\n".join(log_lines[-8:]))
             if found:
                 creator_websites = [found]
 
@@ -518,6 +523,6 @@ if run:
 
 st.divider()
 st.markdown(
-    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-18o</small>",
+    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-18p</small>",
     unsafe_allow_html=True,
 )
