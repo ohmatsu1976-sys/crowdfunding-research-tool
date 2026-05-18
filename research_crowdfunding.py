@@ -538,36 +538,48 @@ def _clean_ks_url(url: str) -> str:
 def fetch_kickstarter_project(url: str) -> Optional[Dict]:
     """Kickstarter プロジェクトページからデータを取得"""
     base_url = _clean_ks_url(url)
-    sess = _session()
+    creator_slug = _extract_creator_from_ks_url(base_url)
+    product_slug = base_url.rstrip("/").split("/")[-1]
 
-    # ── 1. JSON APIエンドポイント（Cloudflare回避・最優先）───────────
-    json_url = base_url + ".json"
+    # ── 1. 検索API + cloudscraper（pledged取得の最優先手段）──────────
+    search_term = " ".join(w for w in product_slug.replace("-", " ").split() if len(w) > 1)
+    search_url = (
+        "https://www.kickstarter.com/projects/search.json"
+        f"?term={requests.utils.quote(search_term)}&sort=most_funded&page=1"
+    )
+    scraper = _ks_session()
     try:
-        resp = sess.get(json_url, timeout=15)
-        if resp.status_code == 200:
-            data = resp.json()
-            proj = data.get("project", data)
-            name = proj.get("name", "")
-            if name:
+        resp = scraper.get(search_url, timeout=15)
+        if resp.status_code == 200 and resp.text.strip():
+            for proj in resp.json().get("projects", []):
+                proj_web_url = (proj.get("urls", {}) or {}).get("web", {}).get("project", "")
+                # creator_slug か product_slug の先頭20文字でマッチ
+                if creator_slug and creator_slug in proj_web_url:
+                    pass  # creator_slug が一致
+                elif product_slug[:20] not in proj_web_url:
+                    continue
                 pledged = float(proj.get("pledged", 0) or 0)
-                creator = proj.get("creator", {}) or {}
-                creator_slug = _extract_creator_from_ks_url(base_url)
+                creator = (proj.get("creator", {}) or {})
+                cat     = proj.get("category", {})
+                genre   = cat.get("name", "Technology") if isinstance(cat, dict) else "Technology"
+                # proj_web_url はフルURL（https://...）のためそのまま使用
+                final_url = proj_web_url if proj_web_url.startswith("http") else base_url
                 return {
                     "platform":      "Kickstarter",
-                    "name":          name,
+                    "name":          proj.get("name", ""),
                     "maker":         creator.get("name", creator_slug),
-                    "url":           base_url,
+                    "url":           final_url,
                     "raised_usd":    pledged,
                     "raised_jpy":    int(pledged * JPY_PER_USD),
                     "backers":       int(proj.get("backers_count", 0) or 0),
-                    "genre":         "Technology",
-                    "description":   proj.get("blurb", proj.get("description", "")),
+                    "genre":         genre,
+                    "description":   proj.get("blurb", ""),
                     "goal_usd":      float(proj.get("goal", 0) or 0),
                     "country":       proj.get("country", ""),
                     "_creator_slug": creator_slug,
                 }
     except Exception as e:
-        print(f"  [KS] JSON API エラー: {e}")
+        print(f"  [KS] 検索API エラー: {e}")
 
     # ── 2. cloudscraperでHTMLスクレイピング（フォールバック）────────
     scraper = _ks_session()
@@ -589,7 +601,6 @@ def fetch_kickstarter_project(url: str) -> Optional[Dict]:
                     continue
                 pledged_raw = proj.get("pledged", {})
                 pledged = float(pledged_raw.get("amount", 0) if isinstance(pledged_raw, dict) else (pledged_raw or 0))
-                creator_slug = _extract_creator_from_ks_url(final_url)
                 return {
                     "platform": "Kickstarter", "name": name, "maker": creator_slug,
                     "url": final_url, "raised_usd": pledged,
@@ -602,10 +613,8 @@ def fetch_kickstarter_project(url: str) -> Optional[Dict]:
                 continue
 
         title_tag = soup.find("meta", property="og:title")
-        desc_tag  = soup.find("meta", property="og:description")
         name = title_tag["content"] if title_tag else (soup.title.string if soup.title else "")
-        blurb = desc_tag["content"] if desc_tag else ""
-        creator_slug = _extract_creator_from_ks_url(final_url)
+        blurb = (soup.find("meta", property="og:description") or {}).get("content", "")
         if name:
             return {
                 "platform": "Kickstarter", "name": name, "maker": creator_slug,
