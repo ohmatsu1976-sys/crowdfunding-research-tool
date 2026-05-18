@@ -955,7 +955,9 @@ def fetch_indiegogo_project(url: str) -> Optional[Dict]:
         soup = BeautifulSoup(html, "html.parser")
 
         # 2a. Next.js __NEXT_DATA__ （最近のIGG構造）
+        # キャンペーンデータの取得 + JSON全体からのクリエイターURL抽出を同時実行
         next_tag = soup.find("script", id="__NEXT_DATA__")
+        _next_data_ext_links: dict = {}  # __NEXT_DATA__内の外部リンク（後段で使用）
         if next_tag and next_tag.string:
             try:
                 ndata = json.loads(next_tag.string)
@@ -969,6 +971,17 @@ def fetch_indiegogo_project(url: str) -> Optional[Dict]:
                         return result
             except Exception:
                 pass
+            # __NEXT_DATA__全体をregexスキャンしてクリエイター外部URLを探す
+            _nd_skip = ("indiegogo.com", "facebook.com/sharer", "twitter.com/intent",
+                        "linkedin.com/share", "cdn.", "static.", "cloudfront.")
+            for pat in (
+                r'"(?:website|websiteUrl|website_url|homepage|external_url)"\s*:\s*"(https?://[^"]{4,})"',
+            ):
+                for m in re.finditer(pat, next_tag.string):
+                    u = m.group(1)
+                    if not any(s in u for s in _nd_skip):
+                        _categorize_link(u, _next_data_ext_links,
+                                         ("indiegogo.com", "facebook.com/sharer"))
 
         # 2b. JSON-LD structured data
         for ld in soup.find_all("script", type="application/ld+json"):
@@ -1067,9 +1080,12 @@ def fetch_indiegogo_project(url: str) -> Optional[Dict]:
 
             # 有効なスラグ（URLから抽出したものを優先）
             effective_slug = creator_slug or maker_slug
+            # 優先順位: プロフィールリンク > __NEXT_DATA__スキャン
+            merged_links = dict(_next_data_ext_links)
+            merged_links.update(profile_links)  # profile_linksを優先
             creator_websites = []
-            if profile_links.get("website"):
-                creator_websites.append(profile_links["website"])
+            if merged_links.get("website"):
+                creator_websites.append(merged_links["website"])
             # アクセス可能だったプロフィールURL（リンクは取れなくても有効なURLとして保持）
             valid_profile_url = accessible_profiles[0] if accessible_profiles else ""
             return {
@@ -1081,7 +1097,7 @@ def fetch_indiegogo_project(url: str) -> Optional[Dict]:
                 "_creator_slug": effective_slug,
                 "_creator_websites": creator_websites,
                 "_official_site": creator_websites[0] if creator_websites else "",
-                "_igg_profile": profile_links,
+                "_igg_profile": merged_links,
                 "_valid_profile_url": valid_profile_url,
             }
 
@@ -1176,6 +1192,21 @@ def find_creator_site(creator_slug: str, product_name: str = "",
                 soup = BeautifulSoup(resp.text, "html.parser")
                 for a in soup.find_all("a", href=True):
                     href = a["href"]
+                    if href.startswith("http") and not any(s in href for s in _SKIP_DOMAINS):
+                        return href
+        except Exception:
+            pass
+
+        # Approach C: Bing HTML（DDGがブロックされてもBingは通る場合あり）
+        try:
+            resp = sess.get(
+                f"https://www.bing.com/search?q={encoded}&setlang=en-US",
+                timeout=12,
+            )
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, "html.parser")
+                for a in soup.select("li.b_algo h2 a, #b_results h2 a"):
+                    href = a.get("href", "")
                     if href.startswith("http") and not any(s in href for s in _SKIP_DOMAINS):
                         return href
         except Exception:
