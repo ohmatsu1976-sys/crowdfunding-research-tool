@@ -759,8 +759,30 @@ def fetch_kickstarter_project(url: str) -> Optional[Dict]:
     return None
 
 
+def _categorize_link(href: str, links: dict, skip: tuple) -> None:
+    """URLをSNS種別に分類してlinksに追加するヘルパー"""
+    if not href or not href.startswith("http"):
+        return
+    if any(s in href for s in skip):
+        return
+    if "instagram.com" in href:
+        links.setdefault("instagram", href)
+    elif "youtube.com" in href:
+        links.setdefault("youtube", href)
+    elif "facebook.com" in href:
+        links.setdefault("facebook", href)
+    elif "twitter.com" in href or "x.com" in href:
+        links.setdefault("twitter", href)
+    elif "linkedin.com" in href:
+        links.setdefault("linkedin", href)
+    else:
+        links.setdefault("website", href)
+
+
 def _igg_profile_links(profile_url: str, maker: str = "", sess=None) -> dict:
-    """Indiegogoクリエイタープロフィールページから公式サイト・SNSリンクを取得"""
+    """Indiegogoクリエイタープロフィールページから公式サイト・SNSリンクを取得
+    Next.js SPAのため<a>タグだけでなく__NEXT_DATA__とscriptタグ内JSONも解析する
+    """
     if not profile_url:
         return {}
     if sess is None:
@@ -771,27 +793,69 @@ def _igg_profile_links(profile_url: str, maker: str = "", sess=None) -> dict:
         r = sess.get(profile_url, timeout=12, allow_redirects=True)
         if r.status_code != 200:
             return {}
+        # リダイレクトでホームページ等に飛んだ場合はスキップ
+        if "/individuals/" not in r.url:
+            return {}
         soup = BeautifulSoup(r.text, "html.parser")
         links = {}
+
+        # 1. __NEXT_DATA__ JSON（Next.js SSRデータ）
+        next_tag = soup.find("script", id="__NEXT_DATA__")
+        if next_tag and next_tag.string:
+            try:
+                ndata = json.loads(next_tag.string)
+                pp = ndata.get("props", {}).get("pageProps", {})
+                # Indiegogoのindividualページの可能性のあるキー
+                individual = (
+                    pp.get("individual") or pp.get("profile") or
+                    pp.get("userData") or pp.get("user") or
+                    pp.get("data", {}).get("individual") or
+                    pp.get("data", {}).get("profile") or {}
+                )
+                # linksフィールド（配列 or dict）
+                ext_links = (individual.get("links") or
+                             individual.get("external_links") or
+                             individual.get("socialLinks") or [])
+                if isinstance(ext_links, list):
+                    for lnk in ext_links:
+                        url_val = lnk if isinstance(lnk, str) else (
+                            lnk.get("url") or lnk.get("href") or "")
+                        _categorize_link(url_val, links, _SKIP)
+                elif isinstance(ext_links, dict):
+                    for url_val in ext_links.values():
+                        if isinstance(url_val, str):
+                            _categorize_link(url_val, links, _SKIP)
+                # websiteフィールド（文字列）
+                for key in ("website", "website_url", "websiteUrl", "homepage", "url"):
+                    w = individual.get(key, "")
+                    if w and isinstance(w, str) and w.startswith("http"):
+                        links.setdefault("website", w)
+                        break
+                if links:
+                    return links
+            except Exception:
+                pass
+
+        # 2. スクリプトタグ内JSONからURL値を正規表現で抽出（ブルートフォース）
+        for script in soup.find_all("script"):
+            text = script.string or ""
+            if "http" not in text:
+                continue
+            # "website":"https://..." パターン
+            for m in re.finditer(
+                r'"(?:website|websiteUrl|website_url|homepage|external_url)"'
+                r'\s*:\s*"(https?://[^"]{4,})"', text
+            ):
+                _categorize_link(m.group(1), links, _SKIP)
+            # "url":"https://..." （indiegogo以外のドメイン）
+            for m in re.finditer(r'"url"\s*:\s*"(https?://(?!(?:www\.)?indiegogo\.com)[^"]{4,})"', text):
+                _categorize_link(m.group(1), links, _SKIP)
+            if links.get("website"):
+                return links
+
+        # 3. <a>タグフォールバック（静的HTML中にリンクがある場合）
         for a in soup.find_all("a", href=True):
-            href = a["href"]
-            if not href.startswith("http"):
-                continue
-            if any(s in href for s in _SKIP):
-                continue
-            if "instagram.com" in href:
-                links.setdefault("instagram", href)
-            elif "youtube.com" in href:
-                links.setdefault("youtube", href)
-            elif "facebook.com" in href:
-                links.setdefault("facebook", href)
-            elif "twitter.com" in href or "x.com" in href:
-                links.setdefault("twitter", href)
-            elif "linkedin.com" in href:
-                links.setdefault("linkedin", href)
-            else:
-                # 公式サイト（indiegogo以外の外部リンク）
-                links.setdefault("website", href)
+            _categorize_link(a["href"], links, _SKIP)
         return links
     except Exception:
         return {}
