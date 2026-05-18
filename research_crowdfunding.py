@@ -847,11 +847,13 @@ def _extract_from_slug(url: str) -> Dict:
     base = url.split("?")[0].rstrip("/")
     slug = base.split("/")[-1]
     creator = _extract_creator_from_ks_url(url)
+    # 数値IDはメーカー名として不適切なので空にする
+    maker = "" if str(creator).isdigit() else creator
     # ハイフン区切りを単語に変換して商品名を推定
     name = " ".join(w.capitalize() for w in slug.replace("-", " ").split())
     platform = "Kickstarter" if "kickstarter.com" in url else "Indiegogo"
     return {
-        "platform": platform, "name": name, "maker": creator,
+        "platform": platform, "name": name, "maker": maker,
         "url": base, "raised_usd": 0, "raised_jpy": 0,
         "backers": 0, "genre": "Technology",
         "description": f"（URL: {base}）", "goal_usd": 0, "country": "",

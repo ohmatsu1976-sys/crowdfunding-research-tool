@@ -285,7 +285,7 @@ if run:
             continue
 
         if p.get("_from_slug"):
-            log_lines.append(f"      📎 URL推定モード: {p.get('name','')[:40]}")
+            log_lines.append(f"      ⚠️ KS自動取得不可（URLから商品名推定）: {p.get('name','')[:40]}")
         else:
             log_lines.append(f"      ✅ 商品名: {p.get('name','')[:40]}")
 
@@ -355,6 +355,21 @@ if run:
 
     if errors:
         st.warning(f"取得できなかったURL: {len(errors)}件\n" + "\n".join(errors))
+
+    # スラグ推定モードの件数確認
+    slug_mode_count = sum(1 for r in results if any(
+        r.get("調達額(円)", 0) == 0 and r.get("調達額(USD)", 0) == 0
+        for _ in [1]
+    ))
+    from_slug_urls = [e["url"] for e in targets if e["url"] in
+                      [r.get("掲載URL","") for r in results if r.get("調達額(USD)", 1) == 0]]
+    if slug_mode_count > 0:
+        st.info(
+            f"💡 **{slug_mode_count}件** の調達額が自動取得できませんでした。"
+            "URLの後ろに半角スペース＋金額を追加すると反映されます。\n"
+            "例: `https://www.kickstarter.com/projects/xxx/yyy  $57,485`",
+            icon="💡",
+        )
 
     # ── Step 3: 結果表示 ────────────────────────────────────────────────────────
 
