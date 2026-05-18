@@ -298,7 +298,8 @@ if run:
             continue
 
         if p.get("_from_slug"):
-            log_lines.append(f"      ⚠️ KS自動取得不可（URLから商品名推定）: {p.get('name','')[:40]}")
+            platform_label = "IGG" if "indiegogo" in url else "KS"
+            log_lines.append(f"      ⚠️ {platform_label}自動取得不可（URLから商品名推定）: {p.get('name','')[:40]}")
         else:
             log_lines.append(f"      ✅ 商品名: {p.get('name','')[:40]}")
 
@@ -316,11 +317,12 @@ if run:
                 log_lines.append(f"      🌐 公式サイト取得: {found_list[0][:50]}")
                 log_area.code("\n".join(log_lines[-8:]))
 
-        # 優先3: DuckDuckGo検索
-        if not creator_websites and p.get("_creator_slug"):
-            log_lines.append(f"      🔍 公式サイト検索中: {p['_creator_slug']}")
+        # 優先3: DuckDuckGo検索（creator_slugまたは商品名で検索）
+        if not creator_websites and (p.get("_creator_slug") or p.get("name")):
+            search_label = p.get("_creator_slug") or p.get("name", "")
+            log_lines.append(f"      🔍 公式サイト検索中: {search_label[:40]}")
             log_area.code("\n".join(log_lines[-8:]))
-            found = find_creator_site(p["_creator_slug"], p.get("name", ""))
+            found = find_creator_site(p.get("_creator_slug", ""), p.get("name", ""))
             if found:
                 creator_websites = [found]
 
@@ -380,9 +382,11 @@ if run:
                       [r.get("掲載URL","") for r in results if r.get("調達額(USD)", 1) == 0]]
     if slug_mode_count > 0:
         st.info(
-            f"💡 **{slug_mode_count}件** の調達額が自動取得できませんでした。"
+            f"💡 **{slug_mode_count}件** の調達額が自動取得できませんでした。\n\n"
+            "**Indiegogo**: 2025年以降、APIが廃止されデータ取得不可のため調達額は手動入力してください。\n"
+            "**Kickstarter**: クラウドサーバーIPがブロックされる場合があります。\n\n"
             "URLの後ろに半角スペース＋金額を追加すると反映されます。\n"
-            "例: `https://www.kickstarter.com/projects/xxx/yyy  $57,485`",
+            "例: `https://www.indiegogo.com/projects/xxx  $57,485`",
             icon="💡",
         )
 
@@ -493,6 +497,6 @@ if run:
 
 st.divider()
 st.markdown(
-    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-18f</small>",
+    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-18g</small>",
     unsafe_allow_html=True,
 )

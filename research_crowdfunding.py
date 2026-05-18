@@ -908,21 +908,22 @@ def _extract_creator_from_ks_url(url: str) -> str:
 
 def find_creator_site(creator_slug: str, product_name: str = "") -> str:
     """クリエイタースラグ・商品名から公式サイトを探す"""
-    if not creator_slug:
+    if not creator_slug and not product_name:
         return ""
     sess = _session()
 
-    # ── 1. ドメイン直接試打 ──────────────────────────────────────────
-    extensions = [".com", ".io", ".co", ".shop", ".tech", ".ai", ".store", ".net"]
-    for ext in extensions:
-        for prefix in [creator_slug, f"www.{creator_slug}"]:
-            candidate = f"https://{prefix}{ext}"
-            try:
-                resp = sess.get(candidate, timeout=6, allow_redirects=True)
-                if resp.status_code == 200 and len(resp.text) > 500:
-                    return resp.url
-            except Exception:
-                continue
+    # ── 1. ドメイン直接試打（creator_slugがある場合のみ）────────────
+    if creator_slug:
+        extensions = [".com", ".io", ".co", ".shop", ".tech", ".ai", ".store", ".net"]
+        for ext in extensions:
+            for prefix in [creator_slug, f"www.{creator_slug}"]:
+                candidate = f"https://{prefix}{ext}"
+                try:
+                    resp = sess.get(candidate, timeout=6, allow_redirects=True)
+                    if resp.status_code == 200 and len(resp.text) > 500:
+                        return resp.url
+                except Exception:
+                    continue
 
     # ── 2. DuckDuckGo で検索 ────────────────────────────────────────
     query = product_name if product_name else creator_slug
@@ -932,7 +933,6 @@ def find_creator_site(creator_slug: str, product_name: str = "") -> str:
         resp = sess.get(ddg_url, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
-            # AbstractURL または Results[0].FirstURL
             official = data.get("AbstractURL", "")
             if not official and data.get("Results"):
                 official = data["Results"][0].get("FirstURL", "")
