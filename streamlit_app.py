@@ -250,6 +250,19 @@ if run:
         st.error("anthropic パッケージがインストールされていません: pip install anthropic")
         st.stop()
 
+    # Claude API 接続テスト（エラーを可視化）
+    with st.spinner("Claude API 接続確認中..."):
+        try:
+            _test = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=10,
+                messages=[{"role": "user", "content": "hi"}],
+            )
+        except Exception as _e:
+            st.error(f"⚠️ Claude API 接続エラー: {_e}")
+            st.caption("Streamlit Cloud の Secrets に ANTHROPIC_API_KEY が正しく設定されているか確認してください。")
+            st.stop()
+
     # 送信者情報をsession_stateに保持してClaude分析に渡す
     _sender_name    = sender_name    if sender_name    else "【氏名】"
     _sender_company = sender_company if sender_company else "【会社名・屋号】"
@@ -480,6 +493,6 @@ if run:
 
 st.divider()
 st.markdown(
-    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-18d</small>",
+    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-18e</small>",
     unsafe_allow_html=True,
 )
