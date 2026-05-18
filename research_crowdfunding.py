@@ -830,11 +830,27 @@ def _parse_igg_campaign(camp: dict, url: str) -> Optional[Dict]:
     }
 
 
+def _extract_igg_slugs(url: str):
+    """IndiegogoのURLからプロジェクトスラグとクリエイタースラグを抽出する
+    旧形式: /projects/{project-slug}
+    新形式: /en/projects/{creator-slug}/{project-slug}
+    """
+    # 新形式: /projects/{creator}/{project} or /en/projects/{creator}/{project}
+    m = re.search(r"indiegogo\.com(?:/en)?/projects/([^/#?]+)/([^/#?]+)", url)
+    if m:
+        return m.group(2), m.group(1)  # project_slug, creator_slug
+    # 旧形式: /projects/{project-slug}
+    m = re.search(r"indiegogo\.com(?:/en)?/projects/([^/#?]+)", url)
+    if m:
+        return m.group(1), ""
+    return "", ""
+
+
 def fetch_indiegogo_project(url: str) -> Optional[Dict]:
     """Indiegogo プロジェクトページからデータを取得"""
     sess = _session()
-    slug_match = re.search(r"indiegogo\.com/projects/([^/#?]+)", url)
-    slug = slug_match.group(1) if slug_match else ""
+    project_slug, creator_slug = _extract_igg_slugs(url)
+    slug = project_slug  # private_api用（プロジェクトスラグ）
 
     # ── 1. private_api エンドポイント（複数パターン）────────────────
     if slug:
@@ -955,17 +971,24 @@ def fetch_indiegogo_project(url: str) -> Optional[Dict]:
                 maker = maker or by_match.group(2).strip()
             else:
                 name = clean
-            # クリエイタープロフィールから公式サイト・SNSを取得
-            profile_links = _igg_profile_links(profile_url, maker, sess) if profile_url else {}
-            if not profile_links and maker:
-                # プロフィールURLが見つからない場合はメーカー名でURLを推測
-                for candidate_slug in [re.sub(r"[^a-z0-9]", "", maker.lower()),
-                                       maker.lower().replace(" ", "-")]:
-                    candidate = f"https://www.indiegogo.com/individuals/{candidate_slug}"
-                    profile_links = _igg_profile_links(candidate, maker, sess)
-                    if profile_links:
-                        break
+            # クリエイタープロフィールURLの候補リスト（URLスラグを優先）
             maker_slug = re.sub(r"[^a-z0-9]", "", maker.lower()) if maker else ""
+            profile_candidates = []
+            if creator_slug:
+                profile_candidates.append(f"https://www.indiegogo.com/individuals/{creator_slug}")
+            if profile_url:
+                profile_candidates.append(profile_url)
+            if maker_slug and maker_slug not in creator_slug:
+                profile_candidates.append(f"https://www.indiegogo.com/individuals/{maker_slug}")
+
+            profile_links = {}
+            for pc in profile_candidates:
+                profile_links = _igg_profile_links(pc, maker, sess)
+                if profile_links:
+                    break
+
+            # 有効なスラグ（URLから抽出したものを優先）
+            effective_slug = creator_slug or maker_slug
             creator_websites = []
             if profile_links.get("website"):
                 creator_websites.append(profile_links["website"])
@@ -975,10 +998,10 @@ def fetch_indiegogo_project(url: str) -> Optional[Dict]:
                 "raised_jpy": int(raised * JPY_PER_USD),
                 "backers": backers, "genre": "",
                 "description": blurb, "goal_usd": 0, "country": "",
-                "_creator_slug": maker_slug,
+                "_creator_slug": effective_slug,
                 "_creator_websites": creator_websites,
                 "_official_site": creator_websites[0] if creator_websites else "",
-                "_igg_profile": profile_links,  # instagram/youtube等
+                "_igg_profile": profile_links,
             }
 
     except Exception as e:
