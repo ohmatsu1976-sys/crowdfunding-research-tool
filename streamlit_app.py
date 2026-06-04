@@ -113,6 +113,8 @@ with st.sidebar:
 
 - [Qstoves（Makuake）](https://www.makuake.com/project/qstoves/)
 - [Travel Bag（Makuake）](https://www.makuake.com/project/travel-bag/)
+- [Vacos Cam（CAMPFIRE）](https://camp-fire.jp/projects/view/313474)
+- [Vacos Cam IR（CAMPFIRE）](https://camp-fire.jp/projects/view/587884)
 
 *「私たちのチームの支援実績」として柔らかく引用されます。
 特定の会社名・代表者名は入りません。*

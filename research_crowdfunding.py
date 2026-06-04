@@ -415,8 +415,10 @@ def get_contact_info(official_url: str) -> Dict:
 
 # 参考実績（受講生本人ではなく「私たちのチーム／支援実績」として柔らかく引用する）
 _REFERENCE_PROJECTS = [
-    ("Qstoves on Makuake",        "https://www.makuake.com/project/qstoves/"),
+    ("Qstoves on Makuake",            "https://www.makuake.com/project/qstoves/"),
     ("Travel Bag project on Makuake", "https://www.makuake.com/project/travel-bag/"),
+    ("Vacos Cam on CAMPFIRE",         "https://camp-fire.jp/projects/view/313474"),
+    ("Vacos Cam IR on CAMPFIRE",      "https://camp-fire.jp/projects/view/587884"),
 ]
 
 # 署名・宛名のプレースホルダ（入力がない場合はそのまま差し替え式で残す）
