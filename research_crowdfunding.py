@@ -424,12 +424,48 @@ _NAME_PLACEHOLDER  = "[Your Name]"
 _BRAND_PLACEHOLDER = "[Brand / Team Name]"
 
 
+def _titleish(text: str) -> str:
+    """人名・ブランド名を自然な表記に整える。
+
+    - すべて小文字 / すべて大文字の語は Title Case にする
+      （例: "hirohito ohmatsu" → "Hirohito Ohmatsu" / "m5stack" → "M5Stack"）
+    - すでに大小混在の語（"GoPro" / "M5Stack" 等）はそのまま尊重する
+    """
+    words = []
+    for w in (text or "").split():
+        if w.islower() or w.isupper():
+            words.append(w.title())   # "m5stack" → "M5Stack", "JOHN" → "John"
+        else:
+            words.append(w)           # "GoPro" 等は変更しない
+    return " ".join(words)
+
+
+# 過度な断定・誇張を避けるための保険（プロンプト指示の取りこぼしを後段で柔らげる）
+_SOFTEN_PATTERNS = [
+    (re.compile(r"\bensures\b",   re.I), "could support"),
+    (re.compile(r"\bensure\b",    re.I), "could support"),
+    (re.compile(r"\bguarantees\b", re.I), "could support"),
+    (re.compile(r"\bguarantee\b",  re.I), "could support"),
+    (re.compile(r"\bis guaranteed to\b", re.I), "could"),
+    (re.compile(r"\bwill definitely\b",  re.I), "could"),
+    (re.compile(r"\bwill certainly\b",   re.I), "could"),
+]
+
+
+def _soften_claims(text: str) -> str:
+    """断定的な表現を、誠実で控えめな表現に置き換える。"""
+    out = text or ""
+    for pat, repl in _SOFTEN_PATTERNS:
+        out = pat.sub(repl, out)
+    return out
+
+
 def _resolve_name(sender_name: str = "") -> str:
     """送信者名。未入力（空・全角プレースホルダ）の場合は [Your Name] を残す。"""
     name = (sender_name or "").strip()
     if not name or name in ("【氏名】", _NAME_PLACEHOLDER):
         return _NAME_PLACEHOLDER
-    return name
+    return _titleish(name)
 
 
 def build_approach_email(project: Dict, reason_en: str = "",
@@ -438,16 +474,17 @@ def build_approach_email(project: Dict, reason_en: str = "",
 
     会社名は固定せず、署名は差し替え式（[Your Name]）。参考実績は
     「私たちのチームの支援実績」として柔らかく引用する。"""
-    product = (project.get("name") or "").strip() or "[Product Name]"
-    brand   = (project.get("maker") or "").strip() or _BRAND_PLACEHOLDER
-    name    = _resolve_name(sender_name)
+    product   = (project.get("name") or "").strip() or "[Product Name]"
+    raw_brand = (project.get("maker") or "").strip()
+    brand     = _titleish(raw_brand) if raw_brand else _BRAND_PLACEHOLDER
+    name      = _resolve_name(sender_name)
 
     reason  = (reason_en or "").strip()
     if not reason:
-        reason = ("its concept and design fit well with what Japanese consumers "
-                  "look for in new and unique products")
-    # 「because ...」に続く形に整える（末尾のピリオドは本文側で付与）
-    reason = reason.rstrip(". 　")
+        reason = ("its concept and design could resonate well with Japanese "
+                  "consumers who value new and unique products")
+    # 断定の強い表現を柔らげ、「because ...」に続く形に整える
+    reason = _soften_claims(reason).rstrip(". 　")
 
     subject = f"Japan Market Opportunity: {product} - Crowdfunding Partnership Proposal"
 
@@ -512,7 +549,7 @@ URL: {url}
   "priority": "A / B / C のいずれか1文字のみ",
   "priority_reason": "優先度の理由（1〜2文）",
   "concerns": "注意点・懸念点（1〜2点）",
-  "approach_reason_en": "英語1文。この商品が日本市場で強い可能性を持つ商品固有の理由。営業メールの 'could have strong potential in Japan because ___' の空欄に自然に入る形で、'because' や末尾のピリオドは付けずに小文字始まりの節で書く。例: 'its compact design suits small Japanese living spaces and there is no comparable product available locally yet'"
+  "approach_reason_en": "英語1文。この商品が日本市場で可能性を持つ商品固有の理由。営業メールの 'could have strong potential in Japan because ___' の空欄に自然に入る形で、'because' や末尾のピリオドは付けず小文字始まりの節で書く。【重要】海外メーカーへの営業メールなので、誠実で控えめな表現にし、過度な断定・誇張は避ける。'ensures' / 'guarantees' / 'will definitely' / 'dominates' のような確定表現は使わず、'could help create early awareness' / 'may resonate well with Japanese consumers' / 'could be a good fit for the Japanese market' のように 'could' / 'may' を使った柔らかい表現にする。例: 'its compact design may resonate with Japanese users who value space-efficient gadgets, and there appears to be little comparable product available locally yet'"
 }}
 
 優先度基準：
