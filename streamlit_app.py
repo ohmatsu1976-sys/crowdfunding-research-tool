@@ -143,7 +143,7 @@ with st.expander("📝 営業メールの送信者名を入力してください
         sender_company = st.text_input(
             "会社名・屋号（任意）",
             placeholder="例：〇〇 Trading（空欄でもOK）",
-            help="メール本文では会社名を固定しません。記録用の任意項目です"
+            help="入力すると、自己紹介（My name is ... from ○○）と署名に反映されます。空欄なら省略されます"
         )
     if not sender_name:
         st.caption("⚠️ 未入力の場合、署名は [Your Name] のまま出力されます（あとから差し替え可）")

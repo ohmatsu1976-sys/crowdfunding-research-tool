@@ -471,15 +471,30 @@ def _resolve_name(sender_name: str = "") -> str:
 
 
 def build_approach_email(project: Dict, reason_en: str = "",
-                         sender_name: str = "") -> Dict:
+                         sender_name: str = "", sender_company: str = "") -> Dict:
     """商品情報から汎用営業メール（件名・本文）を組み立てて返す。
 
-    会社名は固定せず、署名は差し替え式（[Your Name]）。参考実績は
-    「私たちのチームの支援実績」として柔らかく引用する。"""
+    送信者名・会社名/屋号は入力があれば本文の自己紹介と署名に反映する。
+    未入力の名前は差し替え式（[Your Name]）。会社名は未入力なら省略する。
+    参考実績は「私たちのチームの支援実績」として柔らかく引用する。"""
     product   = (project.get("name") or "").strip() or "[Product Name]"
     raw_brand = (project.get("maker") or "").strip()
     brand     = _titleish(raw_brand) if raw_brand else _BRAND_PLACEHOLDER
     name      = _resolve_name(sender_name)
+
+    # 会社名・屋号（入力時のみ反映。未入力・プレースホルダは空扱い）
+    company = (sender_company or "").strip()
+    if company in ("【会社名・屋号】", "[Company / Business Name]"):
+        company = ""
+
+    # 自己紹介：会社名があれば「from 会社名」を添える
+    if company:
+        intro = f"My name is {name} from {company}, and I am based in Japan."
+    else:
+        intro = f"My name is {name}, and I am based in Japan."
+
+    # 署名：会社名があれば名前の下に添える
+    signature = f"{name}\n{company}" if company else name
 
     reason  = (reason_en or "").strip()
     if not reason:
@@ -497,7 +512,7 @@ def build_approach_email(project: Dict, reason_en: str = "",
     body = f"""\
 Dear {brand} Team,
 
-My name is {name}, and I am based in Japan.
+{intro}
 
 I came across your product, {product}, and I was very impressed by its concept, design, and potential value for Japanese consumers.
 
@@ -524,7 +539,7 @@ I would also like to learn more about your current product stage, production tim
 Thank you very much for your time.
 
 Best regards,
-{name}"""
+{signature}"""
 
     return {"approach_subject": subject, "approach_body": body}
 
@@ -573,7 +588,7 @@ def analyze_with_claude(project: Dict, client, sender_name: str = "", sender_com
     }
     # Claude 未接続でも、汎用テンプレートで営業メールは生成する
     if client is None:
-        return {**defaults, **build_approach_email(project, "", sender_name)}
+        return {**defaults, **build_approach_email(project, "", sender_name, sender_company)}
 
     try:
         prompt = _ANALYSIS_PROMPT.format(
@@ -592,7 +607,7 @@ def analyze_with_claude(project: Dict, client, sender_name: str = "", sender_com
         print(f"  [Claude] {msg}")
         if errors is not None:
             errors.append(msg)
-        return {**defaults, **build_approach_email(project, "", sender_name)}
+        return {**defaults, **build_approach_email(project, "", sender_name, sender_company)}
 
     last_err = None
     for attempt in range(3):
@@ -608,7 +623,7 @@ def analyze_with_claude(project: Dict, client, sender_name: str = "", sender_com
             analysis = {**defaults, **json.loads(json_str)}
             # 商品固有の理由を使って営業メールを組み立てる（会社名は固定しない）
             analysis.update(
-                build_approach_email(project, analysis.get("approach_reason_en", ""), sender_name)
+                build_approach_email(project, analysis.get("approach_reason_en", ""), sender_name, sender_company)
             )
             return analysis
         except Exception as e:
@@ -623,7 +638,7 @@ def analyze_with_claude(project: Dict, client, sender_name: str = "", sender_com
     if errors is not None:
         errors.append(msg)
     # 分析に失敗しても営業メールだけは出せるようにする
-    return {**defaults, **build_approach_email(project, "", sender_name)}
+    return {**defaults, **build_approach_email(project, "", sender_name, sender_company)}
 
 # ───────────────────────────────────────────────────────────────────────────────
 # CSV 出力定義
