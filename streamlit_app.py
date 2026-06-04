@@ -106,17 +106,16 @@ with st.sidebar:
 """)
 
     st.divider()
-    st.markdown("### 運営会社実績")
+    st.markdown("### 参考実績（メールに自動引用）")
     st.markdown("""
-**Base on Base LLC**
+営業メールには、チームの**参考実績**として
+以下のMakuakeプロジェクトが自動で引用されます。
 
-| プロジェクト | 調達額 | 達成率 |
-|------------|--------|--------|
-| VACOS CAM | ¥23,403,000 | 7,801% |
-| VACOS CAM IR | ¥11,149,912 | 5,574% |
-| **合計** | **¥34,000,000+** | |
+- [Qstoves（Makuake）](https://www.makuake.com/project/qstoves/)
+- [Travel Bag（Makuake）](https://www.makuake.com/project/travel-bag/)
 
-*CAMPFIRE・Makuakeにて実績多数*
+*「私たちのチームの支援実績」として柔らかく引用されます。
+特定の会社名・代表者名は入りません。*
 """)
     st.divider()
     st.caption("© クラファン物販スクール")
@@ -130,22 +129,22 @@ st.caption(
 )
 
 # ── 送信者情報入力 ──────────────────────────────────────────────────────────────
-with st.expander("📝 営業メールの送信者情報を入力してください（必須）", expanded=True):
+with st.expander("📝 営業メールの送信者名を入力してください", expanded=True):
     col_name, col_company = st.columns(2)
     with col_name:
         sender_name = st.text_input(
-            "氏名",
-            placeholder="例：山田 太郎",
-            help="営業メールの署名に使用されます"
+            "氏名（英語表記）",
+            placeholder="例：Taro Yamada",
+            help="営業メールの署名（Best regards 以下）に使用されます"
         )
     with col_company:
         sender_company = st.text_input(
-            "会社名・屋号",
-            placeholder="例：株式会社〇〇 / 〇〇商店",
-            help="営業メールの送信元として使用されます"
+            "会社名・屋号（任意）",
+            placeholder="例：〇〇 Trading（空欄でもOK）",
+            help="メール本文では会社名を固定しません。記録用の任意項目です"
         )
-    if not sender_name or not sender_company:
-        st.caption("⚠️ 入力するとメールが自動でカスタマイズされます")
+    if not sender_name:
+        st.caption("⚠️ 未入力の場合、署名は [Your Name] のまま出力されます（あとから差し替え可）")
 
 min_jpy = int(MIN_RAISED_USD * JPY_PER_USD / 1_000_000)
 max_jpy = int(MAX_RAISED_USD * JPY_PER_USD / 1_000_000)
@@ -544,16 +543,21 @@ if run:
         with st.expander("全カラムを表示"):
             st.dataframe(df, use_container_width=True, hide_index=True)
 
-        # 優先度Aの営業メール一覧
-        df_a = df[df["優先度"] == "A"]
-        if not df_a.empty:
-            with st.expander(f"🟢 優先度A 営業メール ({cnt_a}件)"):
-                for _, row in df_a.iterrows():
-                    st.markdown(f"**{row['商品名']}** — {row['メーカー名']}")
-                    st.markdown(f"To: `{row['メールアドレス']}`")
-                    st.markdown(f"Subject: {row['営業メール件名(英語)']}")
-                    st.markdown(row["営業メール本文(英語)"].replace("\n", "  \n"))
-                    st.divider()
+        # 営業メール一覧（全商品。優先度A→B→Cの順で表示）
+        _badge = {"A": "🟢", "B": "🟡", "C": "🔴"}
+        df_mail = df.sort_values("優先度")
+        with st.expander(f"✉️ 営業メール文（全{len(df_mail)}件）", expanded=True):
+            st.caption(
+                "署名が [Your Name] の場合は、ご自身のお名前に差し替えてご利用ください。"
+                "宛名が [Brand / Team Name] の場合も同様に差し替えてください。"
+            )
+            for _, row in df_mail.iterrows():
+                mark = _badge.get(row["優先度"], "")
+                st.markdown(f"**{mark} {row['商品名']}** — {row['メーカー名']}")
+                st.markdown(f"To: `{row['メールアドレス']}`")
+                st.markdown(f"**Subject:** {row['営業メール件名(英語)']}")
+                st.code(row["営業メール本文(英語)"], language=None)
+                st.divider()
 
         # CSV ダウンロード
         csv_bytes = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
@@ -572,6 +576,6 @@ if run:
 
 st.divider()
 st.markdown(
-    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-05-19b</small>",
+    "<small>© クラファン物販スクール　本ツールはスクール受講生専用です　｜　ver 2026-06-04</small>",
     unsafe_allow_html=True,
 )

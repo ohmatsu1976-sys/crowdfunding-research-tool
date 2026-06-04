@@ -407,29 +407,88 @@ def get_contact_info(official_url: str) -> Dict:
 # Claude API 分析
 # ───────────────────────────────────────────────────────────────────────────────
 
-_TRACK_RECORD = """\
-【スクール運営会社の実績（信頼性の根拠として活用）】
-- VACOS CAM（AIスマート防犯カメラ）: CAMPFIRE調達 ¥23,403,000 / 612人支援 / 目標の7,801%達成
-- VACOS CAM IR（AI人体検知カメラ）: CAMPFIRE調達 ¥11,149,912 / 343人支援 / 目標の5,574%達成
-- 合計調達実績: ¥34,000,000以上
-- 実績プラットフォーム: CAMPFIRE・Makuake（日本最大級のクラウドファンディング）
-- 専門: 海外優良製品の日本市場独占展開・Makuakeプロデュース"""
+# ───────────────────────────────────────────────────────────────────────────────
+# 営業メール（汎用テンプレート）
+#   ※特定の会社名・代表者名（Base on Base LLC 等）には固定しない。
+#   　クラファン講座の受講生が、自分の名前に差し替えてそのまま使える文面にする。
+# ───────────────────────────────────────────────────────────────────────────────
+
+# 参考実績（受講生本人ではなく「私たちのチーム／支援実績」として柔らかく引用する）
+_REFERENCE_PROJECTS = [
+    ("Qstoves on Makuake",        "https://www.makuake.com/project/qstoves/"),
+    ("Travel Bag project on Makuake", "https://www.makuake.com/project/travel-bag/"),
+]
+
+# 署名・宛名のプレースホルダ（入力がない場合はそのまま差し替え式で残す）
+_NAME_PLACEHOLDER  = "[Your Name]"
+_BRAND_PLACEHOLDER = "[Brand / Team Name]"
 
 
-def _build_company_profile(sender_name: str = "", sender_company: str = "") -> str:
-    name    = sender_name    if sender_name    else "【氏名】"
-    company = sender_company if sender_company else "【会社名・屋号】"
-    return f"""\
-【送信者情報】
-氏名: {name}
-会社名/屋号: {company}
+def _resolve_name(sender_name: str = "") -> str:
+    """送信者名。未入力（空・全角プレースホルダ）の場合は [Your Name] を残す。"""
+    name = (sender_name or "").strip()
+    if not name or name in ("【氏名】", _NAME_PLACEHOLDER):
+        return _NAME_PLACEHOLDER
+    return name
 
-{_TRACK_RECORD}
 
-※営業メール本文では、送信者を「{name} from {company}」として紹介してください。
-　スクール運営会社の実績（VACOS CAM ¥23M調達など）は
-　「私が所属するクラファンスクールの運営実績」として自然に引用し、
-　信頼性の根拠として使用してください。"""
+def build_approach_email(project: Dict, reason_en: str = "",
+                         sender_name: str = "") -> Dict:
+    """商品情報から汎用営業メール（件名・本文）を組み立てて返す。
+
+    会社名は固定せず、署名は差し替え式（[Your Name]）。参考実績は
+    「私たちのチームの支援実績」として柔らかく引用する。"""
+    product = (project.get("name") or "").strip() or "[Product Name]"
+    brand   = (project.get("maker") or "").strip() or _BRAND_PLACEHOLDER
+    name    = _resolve_name(sender_name)
+
+    reason  = (reason_en or "").strip()
+    if not reason:
+        reason = ("its concept and design fit well with what Japanese consumers "
+                  "look for in new and unique products")
+    # 「because ...」に続く形に整える（末尾のピリオドは本文側で付与）
+    reason = reason.rstrip(". 　")
+
+    subject = f"Japan Market Opportunity: {product} - Crowdfunding Partnership Proposal"
+
+    reference_lines = "\n".join(
+        f"* {label}\n  {url}" for label, url in _REFERENCE_PROJECTS
+    )
+
+    body = f"""\
+Dear {brand} Team,
+
+My name is {name}, and I am based in Japan.
+
+I came across your product, {product}, and I was very impressed by its concept, design, and potential value for Japanese consumers.
+
+I am currently exploring opportunities to introduce unique and innovative overseas products to the Japanese market through crowdfunding platforms such as Makuake and CAMPFIRE.
+
+In Japan, crowdfunding is a powerful way to test market demand, build early brand awareness, and connect with consumers before entering general retail channels.
+
+As reference, our team has been involved in successful crowdfunding projects in Japan, including:
+
+{reference_lines}
+
+I believe {product} could have strong potential in Japan because {reason}.
+
+I would be interested in discussing the possibility of working together, such as:
+
+* Launching {product} on Makuake or another Japanese crowdfunding platform
+* Exploring a Japan distribution partnership
+* Testing demand in Japan before expanding into general sales channels
+
+If you are open to discussing the Japanese market, I would be happy to schedule a short online meeting.
+
+I would also like to learn more about your current product stage, production timeline, and partnership policy.
+
+Thank you very much for your time.
+
+Best regards,
+{name}"""
+
+    return {"approach_subject": subject, "approach_body": body}
+
 
 _ANALYSIS_PROMPT = """\
 以下の海外クラファン商品について、日本市場向け分析をJSONのみで返してください。
@@ -445,8 +504,6 @@ _ANALYSIS_PROMPT = """\
 URL: {url}
 説明: {description}
 
-{company_profile}
-
 【出力JSON】
 {{
   "japanese_market_reason": "日本で売れそうな理由（2〜3文）",
@@ -455,8 +512,7 @@ URL: {url}
   "priority": "A / B / C のいずれか1文字のみ",
   "priority_reason": "優先度の理由（1〜2文）",
   "concerns": "注意点・懸念点（1〜2点）",
-  "approach_subject": "英語営業メール件名（1行）",
-  "approach_body": "以下の構成で英語ビジネスメール本文を書いてください（6〜8文）:\\n1. 自己紹介（Base on Base LLC・日本のクラファン専門会社）\\n2. 実績（VACOS CAMで¥23M調達・7,801%達成など具体的数字を含める）\\n3. 貴社製品への関心と日本市場のポテンシャル\\n4. 提案（日本独占販売権またはMakuakeでのローンチ支援）\\n5. 次のステップ（ビデオ通話の提案）"
+  "approach_reason_en": "英語1文。この商品が日本市場で強い可能性を持つ商品固有の理由。営業メールの 'could have strong potential in Japan because ___' の空欄に自然に入る形で、'because' や末尾のピリオドは付けずに小文字始まりの節で書く。例: 'its compact design suits small Japanese living spaces and there is no comparable product available locally yet'"
 }}
 
 優先度基準：
@@ -474,11 +530,11 @@ def analyze_with_claude(project: Dict, client, sender_name: str = "", sender_com
         "priority":               "B",
         "priority_reason":        "（Claude未接続のため省略）",
         "concerns":               "未確認",
-        "approach_subject":       "",
-        "approach_body":          "",
+        "approach_reason_en":     "",
     }
+    # Claude 未接続でも、汎用テンプレートで営業メールは生成する
     if client is None:
-        return defaults
+        return {**defaults, **build_approach_email(project, "", sender_name)}
 
     try:
         prompt = _ANALYSIS_PROMPT.format(
@@ -491,14 +547,13 @@ def analyze_with_claude(project: Dict, client, sender_name: str = "", sender_com
             genre=project.get("genre", ""),
             url=project.get("url", ""),
             description=str(project.get("description", ""))[:400].replace("{", "｛").replace("}", "｝"),
-            company_profile=_build_company_profile(sender_name, sender_company),
         )
     except Exception as e:
         msg = f"プロンプト生成エラー: {e}"
         print(f"  [Claude] {msg}")
         if errors is not None:
             errors.append(msg)
-        return defaults
+        return {**defaults, **build_approach_email(project, "", sender_name)}
 
     last_err = None
     for attempt in range(3):
@@ -511,7 +566,12 @@ def analyze_with_claude(project: Dict, client, sender_name: str = "", sender_com
             raw = response.content[0].text.strip()
             m = re.search(r"```json\s*([\s\S]+?)\s*```", raw)
             json_str = m.group(1) if m else raw[raw.find("{"):raw.rfind("}")+1]
-            return {**defaults, **json.loads(json_str)}
+            analysis = {**defaults, **json.loads(json_str)}
+            # 商品固有の理由を使って営業メールを組み立てる（会社名は固定しない）
+            analysis.update(
+                build_approach_email(project, analysis.get("approach_reason_en", ""), sender_name)
+            )
+            return analysis
         except Exception as e:
             last_err = e
             is_overload = "529" in str(e) or "overloaded" in str(e).lower()
@@ -523,7 +583,8 @@ def analyze_with_claude(project: Dict, client, sender_name: str = "", sender_com
     print(f"  [Claude] エラー: {msg}")
     if errors is not None:
         errors.append(msg)
-    return defaults
+    # 分析に失敗しても営業メールだけは出せるようにする
+    return {**defaults, **build_approach_email(project, "", sender_name)}
 
 # ───────────────────────────────────────────────────────────────────────────────
 # CSV 出力定義
