@@ -9,12 +9,12 @@ Streamlit Community Cloud にデプロイして受講生に共有する
 """
 
 import io
+import re
 import sys
 import time
 from pathlib import Path
 
-import pandas as pd
-import streamlit as st
+import streamlit as st  # pandas は結果表示時に遅延import（起動高速化）
 
 # research_crowdfunding.py と同じフォルダにあることを前提
 sys.path.insert(0, str(Path(__file__).parent))
@@ -211,9 +211,6 @@ def parse_url_lines(text: str):
         entries.append({"url": url, "amount_usd": amount_usd})
     return entries
 
-import re as _re_import
-import re
-
 url_entries = parse_url_lines(urls_text)
 urls = [e["url"] for e in url_entries]
 
@@ -243,6 +240,8 @@ with col_note:
     )
 
 if run:
+    import pandas as pd  # 結果表示・CSV出力に使用（ここで初めて読み込む）
+
     # APIキー取得
     try:
         api_key = st.secrets["ANTHROPIC_API_KEY"]
@@ -394,7 +393,7 @@ if run:
                     official_url = site_url
                     contact["official_url"] = site_url
                 continue
-            c = get_contact_info(site_url)
+            c = get_contact_info(site_url, brand=_maker or _slug)
             # メール or フォームが見つかった時点で確定
             if c.get("email", "未確認") != "未確認" or c.get("contact_form", "未確認") != "未確認":
                 contact = c
@@ -449,7 +448,9 @@ if run:
                       [r.get("掲載URL","") for r in results if r.get("調達額(USD)", 1) == 0]]
     if slug_mode_count > 0:
         st.info(
-            f"💡 **{slug_mode_count}件** の調達額が自動取得できませんでした。\n\n"
+            f"💡 **{slug_mode_count}件** はページから情報を取得できず、**URLから推定**しています。\n\n"
+            "この場合、**調達額は0**、**メーカー名はURLからの推定値**です。"
+            "メーカー名は正式な社名と異なることがあるため、必ずご自身で確認してください。\n\n"
             "**Indiegogo**: 2025年以降、APIが廃止されデータ取得不可のため調達額は手動入力してください。\n"
             "**Kickstarter**: クラウドサーバーIPがブロックされる場合があります。\n\n"
             "URLの後ろに半角スペース＋金額を追加すると反映されます。\n"

@@ -1,0 +1,21 @@
+name: keep-alive
+
+# Streamlit Community Cloud はアクセスが無い状態が続くとアプリがスリープし、
+# 次の訪問者が「起きるまで待たされる」ため、定期的にアクセスして起こしておく。
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # 15分ごと（GitHub側の混雑で数分ずれることがあります）
+  workflow_dispatch:          # 手動実行用
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Streamlit app
+        run: |
+          code=$(curl -sS -L --max-time 90 \
+            -c cookies.txt -b cookies.txt \
+            -o /dev/null -w "%{http_code}" \
+            "https://crowdfunding-research-tool-nu7tzczrrywcoy6vrrff3q.streamlit.app/")
+          echo "HTTP status: $code"
+          test "$code" = "200"

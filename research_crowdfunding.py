@@ -18,23 +18,36 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
 
-try:
-    import cloudscraper as _cloudscraper
-    def _ks_session():
-        return _cloudscraper.create_scraper()
-except ImportError:
-    _cloudscraper = None
-    def _ks_session():
-        return _session()
+# cloudscraper / anthropic は重いので遅延import（Streamlit起動を速くするため）
+_cloudscraper = None   # None=未読込 / False=未インストール / モジュール=読込済
 
-try:
-    import anthropic as _anthropic
-except ImportError:
-    _anthropic = None
+
+def _ks_session():
+    """Kickstarter用セッション。cloudscraperは初回使用時に読み込む"""
+    global _cloudscraper
+    if _cloudscraper is None:
+        try:
+            import cloudscraper
+            _cloudscraper = cloudscraper
+        except ImportError:
+            _cloudscraper = False
+    if _cloudscraper:
+        return _cloudscraper.create_scraper()
+    return _session()
+
+
+def _get_anthropic():
+    """anthropicモジュールを返す（未インストールなら None）"""
+    try:
+        import anthropic
+        return anthropic
+    except ImportError:
+        return None
 
 # ───────────────────────────────────────────────────────────────────────────────
 # 設定
@@ -74,7 +87,9 @@ HEADERS = {
     ),
     "Accept-Language": "en-US,en;q=0.9,ja;q=0.8",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
+    # br(Brotli)を要求するとデコーダ未導入の環境で本文が壊れ、
+    # 公式サイト判定もメール抽出も無言で失敗するため gzip/deflate のみにする
+    "Accept-Encoding": "gzip, deflate",
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
     "Sec-Fetch-Dest": "document",
@@ -282,7 +297,14 @@ def find_official_site(project_url: str, maker_name: str) -> list:
                     continue
 
         # Aタグから外部リンクを探す（IGG・KSのフォールバック）
+        # メーカー名が一般語（rest / home など）のときはキーワード照合に使わない。
+        # KSのアカウント名がそのままメーカー名になっている場合があり、誤検出の元になる
         maker_word = maker_name.lower().split()[0] if maker_name else ""
+        if len(maker_word) < 4 or maker_word in _BRAND_STOPWORDS:
+            maker_word = ""
+        # 空文字をキーワードに混ぜると全リンクが一致してしまうため必ず除外する
+        keywords = [kw for kw in ["website", "official", "learn more", "visit us",
+                                  maker_word] if kw]
         found = []
         for a in soup.find_all("a", href=True):
             href = a["href"]
@@ -293,8 +315,7 @@ def find_official_site(project_url: str, maker_name: str) -> list:
                                               "twitter.com", "youtube.com", "linkedin.com"]):
                 continue
             link_text = a.get_text(strip=True).lower()
-            if any(kw in link_text or kw in href.lower()
-                   for kw in ["website", "official", "learn more", "visit us", maker_word]):
+            if any(kw in link_text or kw in href.lower() for kw in keywords):
                 found.append(href)
         return found[:3]
 
@@ -306,7 +327,33 @@ def find_official_site(project_url: str, maker_name: str) -> list:
 # 連絡先取得
 # ───────────────────────────────────────────────────────────────────────────────
 
-def get_contact_info(official_url: str) -> Dict:
+_FREE_MAIL_DOMAINS = (
+    "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com",
+    "yahoo.com", "yahoo.co.jp", "icloud.com", "proton.me", "protonmail.com",
+    "qq.com", "163.com", "126.com", "foxmail.com", "naver.com",
+)
+
+
+def _email_is_plausible(email: str, site_host: str, brand: str = "") -> bool:
+    """そのサイトの持ち主のメールとして妥当か
+
+    テーマの使い回しなどで無関係な会社のアドレスが1件だけ紛れていることがあり、
+    それを『メーカーの連絡先』として出すと受講生が誤送信してしまうため除外する。
+    """
+    domain = email.rsplit("@", 1)[-1].lower()
+    host = (site_host or "").lower().lstrip("www.")
+    root = ".".join(host.split(".")[-2:]) if host else ""
+    if root and (domain == root or domain.endswith("." + root)):
+        return True                      # 同一ドメイン
+    if domain in _FREE_MAIL_DOMAINS:
+        return True                      # 小規模メーカーはフリーメールも普通に使う
+    brand_l = (brand or "").lower()
+    if len(brand_l) >= 4 and brand_l in email.lower():
+        return True                      # ブランド名を含む（例: hello@sitpack-japan.com）
+    return False
+
+
+def get_contact_info(official_url: str, brand: str = "") -> Dict:
     """公式サイトから連絡先情報を取得"""
     info = {
         "official_url":   official_url,
@@ -327,6 +374,8 @@ def get_contact_info(official_url: str) -> Dict:
 
         soup = BeautifulSoup(resp.text, "html.parser")
         text = resp.text
+        base_url  = resp.url or official_url          # リダイレクト後のURLを基準にする
+        site_host = urlparse(base_url).netloc
 
         # メールアドレス抽出
         emails = re.findall(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}", text)
@@ -336,9 +385,12 @@ def get_contact_info(official_url: str) -> Dict:
             "klaviyo", "hubspot", "zendesk",
         ]
         for email in emails:
-            if not any(kw in email.lower() for kw in _BAD_EMAIL_KW):
-                info["email"] = email
-                break
+            if any(kw in email.lower() for kw in _BAD_EMAIL_KW):
+                continue
+            if not _email_is_plausible(email, site_host, brand):
+                continue                              # 無関係な会社のアドレスを弾く
+            info["email"] = email
+            break
 
         # コンタクトフォーム / 問い合わせページ
         contact_kws = ["contact", "wholesale", "distributor", "press", "partner", "inquiry", "about"]
@@ -346,8 +398,8 @@ def get_contact_info(official_url: str) -> Dict:
             href = a["href"]
             text_content = a.get_text(strip=True).lower()
             if any(kw in href.lower() or kw in text_content for kw in contact_kws):
-                full = href if href.startswith("http") else official_url.rstrip("/") + "/" + href.lstrip("/")
-                info["contact_form"] = full
+                # 相対URLは urljoin で解決する（単純連結はロケール重複で404になる）
+                info["contact_form"] = urljoin(base_url, href)
                 break
 
         # contact / about ページを追加でチェック（Shopify 404ページも含む）
@@ -357,7 +409,7 @@ def get_contact_info(official_url: str) -> Dict:
             if info["email"] != "未確認" and info["instagram"] != "未確認":
                 break
             try:
-                sub_url = official_url.rstrip("/") + sub
+                sub_url = urljoin(base_url, sub)
                 sub_resp = sess.get(sub_url, timeout=8)
                 if sub_resp.status_code not in (200, 404):
                     continue
@@ -370,9 +422,13 @@ def get_contact_info(official_url: str) -> Dict:
                         sub_resp.text
                     )
                     for email in sub_emails:
-                        if not any(kw in email.lower() for kw in _BAD_EMAIL_KW + ["shopify", ".png"]):
-                            info["email"] = email
-                            break
+                        if any(kw in email.lower()
+                               for kw in _BAD_EMAIL_KW + ["shopify", ".png"]):
+                            continue
+                        if not _email_is_plausible(email, site_host, brand):
+                            continue
+                        info["email"] = email
+                        break
 
                 # SNS探索（トップで見つからなかった場合）
                 for a in sub_soup.find_all("a", href=True):
@@ -1234,12 +1290,96 @@ def _extract_creator_from_ks_url(url: str) -> str:
     return ""
 
 
+# 公式サイト判定に使えない一般語（ブランド名候補から除外）
+_BRAND_STOPWORDS = {
+    "the", "a", "an", "my", "your", "our", "this", "that", "new", "smart",
+    "ai", "for", "of", "and", "with", "rest", "home", "life", "one", "team",
+    "studio", "design", "shop", "store", "world", "best", "pro", "app",
+    "project", "product", "official", "site", "web", "go", "get", "make",
+}
+
+# 商品名から特徴語を作るときに落とす語（宣伝文句・プラットフォーム名など）
+_GENERIC_TOKENS = {
+    "the", "and", "for", "with", "your", "our", "this", "that", "from",
+    "world", "worlds", "most", "best", "first", "ever", "only", "more",
+    "new", "next", "plus", "pro", "max", "mini", "ultra", "edition",
+    "series", "version", "official", "site", "website", "kickstarter",
+    "indiegogo", "zeczec", "project", "campaign", "perfect", "ultimate",
+    "introducing", "meet",
+}
+
+
+def _brand_tokens(*sources: str) -> List[str]:
+    """ブランド名の候補（ドメイン直打ち用）を優先順に返す"""
+    cands: List[str] = []
+    for raw in sources:
+        if not raw:
+            continue
+        words = re.findall(r"[a-z0-9]+", str(raw).lower())
+        if not words:
+            continue
+        # 先頭語（例: "Sitpack Zen ..." → sitpack / "mono-mono" → mono）
+        if len(words[0]) >= 3 and words[0] not in _BRAND_STOPWORDS:
+            cands.append(words[0])
+        # ハイフン結合形（例: "mono-mono" → monomono）
+        if len(words) > 1:
+            joined = "".join(words)
+            if 3 <= len(joined) <= 20:
+                cands.append(joined)
+    seen = set()
+    return [c for c in cands if not (c in seen or seen.add(c))]
+
+
+def _product_tokens(product_name: str, brand: str = "") -> List[str]:
+    """『そのページが本当にこの商品のサイトか』を確かめるための特徴語"""
+    brand_l = (brand or "").lower()
+    toks: List[str] = []
+    for t in re.findall(r"[a-z0-9]+", (product_name or "").lower()):
+        if len(t) < 4 or t in _GENERIC_TOKENS or t == brand_l or t in toks:
+            continue
+        toks.append(t)
+    return toks
+
+
+def _looks_like_html(text: str) -> bool:
+    """本文が正しくデコードされたHTMLか（圧縮のまま等の壊れた応答を弾く）"""
+    head = text[:4000].lower()
+    return any(m in head for m in ("<html", "<!doctype html", "<head", "<body"))
+
+
+def _page_matches_product(text: str, tokens: List[str]) -> bool:
+    """ページ本文が商品の特徴語を含むか（推測サイトの誤採用を防ぐ決定的チェック）"""
+    if not tokens or not _looks_like_html(text):
+        return False          # 判定材料が無いときは「確認できた」と見なさない
+    low = text[:200_000].lower()
+    hits = sum(1 for t in tokens if t in low)
+    return hits >= (2 if len(tokens) >= 3 else 1)
+
+
+def _brand_in_product_name(brand: str, product_name: str) -> bool:
+    """ブランド名候補が商品名そのものに含まれるか
+
+    含まれる場合、そのドメイン（例: Sitpack Zen → sitpack.com）は
+    クリエイターのアカウント名から推測したドメインより格段に確度が高い。
+    """
+    if len(brand) < 5:
+        return False
+    return brand in re.findall(r"[a-z0-9]+", (product_name or "").lower())
+
+
 def find_creator_site(creator_slug: str, product_name: str = "",
                       maker_name: str = "") -> str:
-    """クリエイタースラグ・商品名・メーカー名から公式サイトを探す"""
+    """クリエイタースラグ・商品名・メーカー名から公式サイトを探す
+
+    重要: 推測で辿り着いたURLは、そのページが本当にこの商品のものか検証してから返す。
+    確認できない場合は空文字を返す（誤ったサイトを公式サイトとして出さないため）。
+    """
     if not creator_slug and not product_name and not maker_name:
         return ""
     sess = _session()
+
+    # 検証用の特徴語（商品名ベース。ブランド名そのものは除外＝ドメイン名と循環するため）
+    _verify_tokens = _product_tokens(product_name, creator_slug)
 
     # ドメイン駐車・売り出しページの判定
     _PARKING_HOSTS = (
@@ -1256,18 +1396,41 @@ def find_creator_site(creator_slug: str, product_name: str = "",
         snippet = resp.text[:3000].lower()
         return any(p in snippet for p in _PARKING_PHRASES)
 
-    # ── 1. ドメイン直接試打（creator_slugがある場合のみ）────────────
-    if creator_slug:
-        extensions = [".com", ".io", ".co", ".shop", ".tech", ".ai", ".store", ".net"]
-        for ext in extensions:
-            for prefix in [creator_slug, f"www.{creator_slug}"]:
-                candidate = f"https://{prefix}{ext}"
-                try:
-                    resp = sess.get(candidate, timeout=6, allow_redirects=True)
-                    if resp.status_code == 200 and len(resp.text) > 500 and not _is_parked(resp):
-                        return resp.url
-                except Exception:
-                    continue
+    # ── 1. ドメイン直接試打 ──────────────────────────────────────────
+    # creator_slug（KSのアカウント名）はブランド名とは限らない（例: /projects/rest/sitpack-zen…）
+    # ため、商品名・メーカー名からもブランド候補を作り、内容を検証してから採用する
+    brand_cands = _brand_tokens(creator_slug, maker_name, product_name)[:3]
+    extensions = [".com", ".io", ".co", ".shop", ".tech", ".ai", ".store", ".net"]
+
+    def _try_domain(brand: str, ext: str) -> str:
+        for prefix in (brand, f"www.{brand}"):
+            try:
+                resp = sess.get(f"https://{prefix}{ext}", timeout=6, allow_redirects=True)
+            except Exception:
+                continue
+            if resp.status_code != 200 or len(resp.text) <= 500 or _is_parked(resp):
+                continue
+            if not _looks_like_html(resp.text):
+                continue
+            # ブランド名が商品名に含まれる場合はドメイン一致自体が強い根拠
+            # （例: "Sitpack Zen ..." ↔ sitpack.com）。
+            # そうでない推測（KSアカウント名など）は本文の特徴語で裏取りする
+            if (_brand_in_product_name(brand, product_name)
+                    or _page_matches_product(resp.text,
+                                             _product_tokens(product_name, brand))):
+                return resp.url
+        return ""
+
+    # まず全候補を .com で試し、その後は上位候補のみ他の拡張子を試す（時間短縮）
+    for brand in brand_cands:
+        hit = _try_domain(brand, ".com")
+        if hit:
+            return hit
+    for brand in brand_cands[:2]:
+        for ext in extensions[1:]:
+            hit = _try_domain(brand, ext)
+            if hit:
+                return hit
 
     # ── 2. DuckDuckGo 検索（html + lite 両エンドポイント）────────────
     _SKIP_DOMAINS = (
@@ -1275,17 +1438,28 @@ def find_creator_site(creator_slug: str, product_name: str = "",
         "facebook.com", "instagram.com", "twitter.com", "x.com",
         "youtube.com", "linkedin.com", "tiktok.com",
     )
-    # クリエイタースラグ→メーカー名→商品名の順で検索
+    # 商品名での検索を最優先（creator_slugは無関係な一般語のことがあるため）
     queries = []
-    if creator_slug:
-        queries.append(f"{creator_slug} official site")
-    if maker_name:
-        queries.append(f"{maker_name} official site")
     if product_name:
         queries.append(f"{product_name} official site")
+    if maker_name and maker_name.lower() != (creator_slug or "").lower():
+        queries.append(f"{maker_name} official site")
+    if creator_slug:
+        queries.append(f"{creator_slug} official site")
+
+    def _verified(href: str) -> bool:
+        """検索結果のURLを実際に開き、この商品のサイトか確認する"""
+        try:
+            resp = sess.get(href, timeout=8, allow_redirects=True)
+        except Exception:
+            return False
+        if resp.status_code != 200 or _is_parked(resp):
+            return False
+        return _page_matches_product(resp.text, _verify_tokens)
 
     for query in queries:
         encoded = requests.utils.quote(query)
+        candidates: List[str] = []
 
         # Approach A: html.duckduckgo.com（uddgエンコードされたURL）
         try:
@@ -1298,7 +1472,7 @@ def find_creator_site(creator_slug: str, product_name: str = "",
                     if uddg:
                         href = requests.utils.unquote(uddg.group(1))
                     if href.startswith("http") and not any(s in href for s in _SKIP_DOMAINS):
-                        return href
+                        candidates.append(href)
         except Exception:
             pass
 
@@ -1310,7 +1484,7 @@ def find_creator_site(creator_slug: str, product_name: str = "",
                 for a in soup.find_all("a", href=True):
                     href = a["href"]
                     if href.startswith("http") and not any(s in href for s in _SKIP_DOMAINS):
-                        return href
+                        candidates.append(href)
         except Exception:
             pass
 
@@ -1325,9 +1499,20 @@ def find_creator_site(creator_slug: str, product_name: str = "",
                 for a in soup.select("li.b_algo h2 a, #b_results h2 a"):
                     href = a.get("href", "")
                     if href.startswith("http") and not any(s in href for s in _SKIP_DOMAINS):
-                        return href
+                        candidates.append(href)
         except Exception:
             pass
+
+        # 上位候補のみ検証（無検証で先頭を返すと無関係サイトを掴む）
+        seen = set()
+        for href in candidates:
+            if href in seen:
+                continue
+            seen.add(href)
+            if len(seen) > 5:
+                break
+            if _verified(href):
+                return href
 
     return ""
 
@@ -1348,6 +1533,13 @@ def _extract_from_slug(url: str) -> Dict:
 
     if "kickstarter.com" in url:
         platform = "Kickstarter"
+        # KSのアカウント名はブランド名とは限らない（例: /projects/rest/sitpack-zen…）。
+        # 一般語だった場合は商品スラグの先頭語をブランド名候補として採用する
+        if (not maker or maker.lower() in _STOPWORDS
+                or maker.lower() in _BRAND_STOPWORDS) and "-" in slug:
+            first_word = slug.split("-")[0].lower()
+            if len(first_word) >= 3 and first_word not in _STOPWORDS:
+                maker = first_word.capitalize()
     elif "zeczec.com" in url:
         platform = "ZECZEC"
         # ZECZECはスラグの先頭単語がブランド名のことが多い（例: kieslect-ai-watch → kieslect）
@@ -1554,7 +1746,8 @@ def main() -> None:
 
     # Claude クライアント
     client = None
-    if not args.no_claude and _anthropic is not None:
+    _anthropic = _get_anthropic() if not args.no_claude else None
+    if _anthropic is not None:
         api_key = _load_api_key()
         if api_key:
             client = _anthropic.Anthropic(api_key=api_key)
@@ -1607,7 +1800,7 @@ def main() -> None:
             print(f"  公式サイト: {official_url[:60]}")
 
         # 連絡先
-        contact = get_contact_info(official_url) if official_url else {
+        contact = get_contact_info(official_url, brand=p.get("maker", "")) if official_url else {
             "official_url": "", "email": "未確認", "contact_form": "未確認",
             "facebook": "未確認", "instagram": "未確認", "linkedin": "未確認",
         }
