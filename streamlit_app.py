@@ -31,6 +31,7 @@ from research_crowdfunding import (
     find_creator_site,
     get_contact_info,
 )
+from summary_table import build_summary_html
 
 # ── ページ設定 ──────────────────────────────────────────────────────────────────
 
@@ -524,22 +525,21 @@ if run:
 
         summary_df = df[[
             "優先度", "商品名", "メーカー名", "プラットフォーム",
-            "調達額(円)", "日本で売れそうな理由",
+            "調達額(円)", "日本で売れそうな理由", "掲載URL",
         ]].copy()
         summary_df["種別"] = df.apply(best_contact_type, axis=1)
         summary_df["アプローチ先リンク"] = df.apply(best_contact_url, axis=1)
 
         st.markdown("**サマリー（主要項目）**")
-        st.dataframe(
-            summary_df.sort_values("優先度"),
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "アプローチ先リンク": st.column_config.LinkColumn(
-                    "アプローチ先",
-                    display_text="🔗 開く",
-                ),
-            },
+        st.caption(
+            "優先度 A → B → C の順に並んでいます。"
+            "並び替え・コピーをしたい場合は下の「全カラムを表示」の表をご利用ください。"
+        )
+
+        # st.dataframe は長文を折り返せないため、理由を全文表示できるHTMLテーブルで描画する
+        st.markdown(
+            build_summary_html(summary_df.to_dict("records")),
+            unsafe_allow_html=True,
         )
 
         # 全カラム展開表示
