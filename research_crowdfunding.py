@@ -608,8 +608,8 @@ _ANALYSIS_PROMPT = """\
 商品名: {name}
 メーカー: {maker}
 プラットフォーム: {platform}
-調達額: ${raised_usd:,.0f} (約{raised_jpy:,}円)
-支援者数: {backers:,}人
+調達額: {funding}
+支援者数: {backers}
 ジャンル: {genre}
 URL: {url}
 説明: {description}
@@ -628,7 +628,13 @@ URL: {url}
 優先度基準：
 A＝コンセプト強・日本未展開・規制リスク低・Makuake向き
 B＝良品だが日本展開済みの可能性あり・競合多め
-C＝面白いが規制・価格・物流・競合に懸念あり"""
+C＝面白いが規制・価格・物流・競合に懸念あり
+
+【重要・情報が「不明」の場合の扱い】
+「不明」「取得できず」と書かれた項目は、単に自動取得できなかっただけで、
+実績が無いという意味ではありません。それを理由に優先度を下げないでください。
+優先度は商品特性（コンセプト・日本での需要・規制リスク・競合状況）で判断し、
+情報が不足している事実は concerns に「調達額が未取得のため要確認」等として記載してください。"""
 
 
 def analyze_with_claude(project: Dict, client, sender_name: str = "", sender_company: str = "",
@@ -646,17 +652,37 @@ def analyze_with_claude(project: Dict, client, sender_name: str = "", sender_com
     if client is None:
         return {**defaults, **build_approach_email(project, "", sender_name, sender_company)}
 
+    # 自動取得できなかった項目を 0 のまま渡すと「1円も集まっていない商品」と
+    # 誤解され、優先度が不当に下がるため「不明」と明示する
+    raised_usd = float(project.get("raised_usd", 0) or 0)
+    raised_jpy = int(project.get("raised_jpy", 0) or 0)
+    backers    = int(project.get("backers", 0) or 0)
+    from_slug  = bool(project.get("_from_slug"))
+
+    funding_txt = (f"${raised_usd:,.0f} (約{raised_jpy:,}円)" if raised_usd > 0
+                   else "取得できず（不明。0円という意味ではありません）")
+    backers_txt = f"{backers:,}人" if backers > 0 else "取得できず（不明）"
+
+    maker_txt = project.get("maker", "") or "不明"
+    name_txt  = project.get("name", "")
+    if from_slug:
+        maker_txt += "（URLからの推定。正式なメーカー名と異なる可能性あり）"
+        name_txt  += "（URLからの推定表記。正式な商品名と異なる可能性あり）"
+
+    desc = str(project.get("description", ""))[:400]
+    if from_slug or not desc.strip():
+        desc = "取得できず（不明）"
+
     try:
         prompt = _ANALYSIS_PROMPT.format(
-            name=project.get("name", ""),
-            maker=project.get("maker", ""),
+            name=name_txt,
+            maker=maker_txt,
             platform=project.get("platform", ""),
-            raised_usd=float(project.get("raised_usd", 0) or 0),
-            raised_jpy=int(project.get("raised_jpy", 0) or 0),
-            backers=int(project.get("backers", 0) or 0),
+            funding=funding_txt,
+            backers=backers_txt,
             genre=project.get("genre", ""),
             url=project.get("url", ""),
-            description=str(project.get("description", ""))[:400].replace("{", "｛").replace("}", "｝"),
+            description=desc.replace("{", "｛").replace("}", "｝"),
         )
     except Exception as e:
         msg = f"プロンプト生成エラー: {e}"
@@ -671,6 +697,8 @@ def analyze_with_claude(project: Dict, client, sender_name: str = "", sender_com
             response = client.messages.create(
                 model=MODEL_ID,
                 max_tokens=1024,
+                # 同じ商品を再度かけたときに判定がぶれないよう固定する
+                temperature=0,
                 messages=[{"role": "user", "content": prompt}],
             )
             raw = response.content[0].text.strip()
@@ -707,9 +735,18 @@ CSV_FIELDS = [
     "日本で売れそうな理由", "日本販売時の訴求ポイント", "競合する日本商品",
     "公式サイトURL", "メールアドレス", "問い合わせフォームURL",
     "Facebook", "Instagram", "LinkedIn",
-    "優先度", "優先度の理由", "注意点・懸念点",
+    "優先度", "判定の確度", "優先度の理由", "注意点・懸念点",
     "営業メール件名(英語)", "営業メール本文(英語)",
 ]
+
+
+def is_low_confidence(p: Dict) -> bool:
+    """判定材料（調達額・説明文など）が揃っていないか
+
+    材料が無いとABC判定は同じ商品でも揺れるため、参考値であることを明示する。
+    """
+    return (bool(p.get("_from_slug")) or bool(p.get("_partial"))
+            or not float(p.get("raised_usd", 0) or 0))
 
 
 def build_row(p: Dict, analysis: Dict, contact: Dict) -> Dict:
@@ -733,6 +770,7 @@ def build_row(p: Dict, analysis: Dict, contact: Dict) -> Dict:
         "Instagram":           contact.get("instagram", "未確認"),
         "LinkedIn":            contact.get("linkedin", "未確認"),
         "優先度":              analysis.get("priority", ""),
+        "判定の確度":          "参考値（データ不足）" if is_low_confidence(p) else "データ取得済み",
         "優先度の理由":        analysis.get("priority_reason", ""),
         "注意点・懸念点":      analysis.get("concerns", ""),
         "営業メール件名(英語)": analysis.get("approach_subject", ""),
@@ -927,6 +965,107 @@ def fetch_kickstarter_project(url: str) -> Optional[Dict]:
 
     except Exception as e:
         print(f"  [KS] ページ取得エラー: {e}")
+
+    # ── 3. 別経路のフォールバック ────────────────────────────────
+    # Kickstarter本体はデータセンターIP（Streamlit Cloud等）からブロックされる
+    # ことがあるため、軽量エンドポイントと外部ミラーを順に試す
+    return _fetch_ks_via_fallback(base_url, creator_slug, product_slug)
+
+
+def _ks_stats_json(base_url: str) -> Dict:
+    """KSの軽量エンドポイント stats.json から調達額・支援者数を取得"""
+    try:
+        resp = _session().get(f"{base_url}/stats.json?v=1", timeout=10)
+        if resp.status_code != 200:
+            return {}
+        proj = resp.json().get("project", {})
+        pledged = float(proj.get("pledged", 0) or 0)
+        if pledged <= 0:
+            return {}
+        return {
+            "raised_usd": pledged,
+            "raised_jpy": int(pledged * JPY_PER_USD),
+            "backers":    int(proj.get("backers_count", 0) or 0),
+        }
+    except Exception:
+        return {}
+
+
+_KICKTRAQ_FUNDED = re.compile(r"Funded:\s*\$([\d,]+)\s*of\s*\$([\d,]+)")
+_KICKTRAQ_BACKERS = re.compile(r"Backers:\s*([\d,]+)")
+
+
+def _kicktraq_project(creator_slug: str, product_slug: str) -> Dict:
+    """Kicktraq（KSの外部トラッキングサイト）からプロジェクト情報を取得
+
+    Kickstarter本体と別ホストのため、本体がブロックされる環境でも取得できる。
+    """
+    if not creator_slug or not product_slug:
+        return {}
+    url = f"https://www.kicktraq.com/projects/{creator_slug}/{product_slug}/"
+    try:
+        resp = _session().get(url, timeout=12, allow_redirects=True)
+        if resp.status_code != 200 or not _looks_like_html(resp.text):
+            return {}
+        soup = BeautifulSoup(resp.text, "html.parser")
+        text = soup.get_text("\n", strip=True)
+
+        data: Dict = {}
+        m = _KICKTRAQ_FUNDED.search(text)
+        if m:
+            pledged = float(m.group(1).replace(",", ""))
+            data["raised_usd"] = pledged
+            data["raised_jpy"] = int(pledged * JPY_PER_USD)
+            data["goal_usd"]   = float(m.group(2).replace(",", ""))
+        m = _KICKTRAQ_BACKERS.search(text)
+        if m:
+            data["backers"] = int(m.group(1).replace(",", ""))
+
+        # 「<商品名> by <メーカー名> :: Kicktraq」形式のタイトル
+        title = soup.title.get_text(strip=True) if soup.title else ""
+        title = title.replace(":: Kicktraq", "").strip()
+        if " by " in title:
+            name, _, maker = title.rpartition(" by ")
+            data["name"]  = name.strip()
+            data["maker"] = maker.strip()
+        elif title:
+            data["name"] = title
+
+        desc = soup.find("meta", attrs={"name": "description"})
+        if desc and desc.get("content"):
+            data["description"] = desc["content"].strip()
+
+        return data if data.get("raised_usd") else {}
+    except Exception:
+        return {}
+
+
+def _fetch_ks_via_fallback(base_url: str, creator_slug: str, product_slug: str) -> Optional[Dict]:
+    """KS本体が取得できないときの代替経路"""
+    project: Dict = {
+        "platform": "Kickstarter", "name": "", "maker": "",
+        "url": base_url, "raised_usd": 0, "raised_jpy": 0,
+        "backers": 0, "genre": "Technology", "description": "",
+        "goal_usd": 0, "country": "", "_creator_slug": creator_slug,
+    }
+
+    kicktraq = _kicktraq_project(creator_slug, product_slug)
+    if kicktraq:
+        project.update(kicktraq)
+        project["_source"] = "kicktraq"
+        print(f"  [KS] Kicktraq から取得: {project.get('name','')[:40]}")
+        return project
+
+    stats = _ks_stats_json(base_url)
+    if stats:
+        project.update(stats)
+        project["_source"] = "stats.json"
+        project["_partial"] = True      # 商品名・メーカー名はスラグからの推定
+        # 商品名は取得できないためスラグから整形する
+        project["name"] = " ".join(w.capitalize() for w in product_slug.replace("-", " ").split())
+        project["maker"] = "" if creator_slug.isdigit() else creator_slug
+        print(f"  [KS] stats.json から調達額を取得: ${stats['raised_usd']:,.0f}")
+        return project
 
     return None
 

@@ -331,7 +331,9 @@ if run:
                 platform_label = "KS"
             log_lines.append(f"      ⚠️ {platform_label}自動取得不可（URLから商品名推定）: {p.get('name','')[:40]}")
         else:
-            log_lines.append(f"      ✅ 商品名: {p.get('name','')[:40]}")
+            _src = p.get("_source", "")
+            _src_note = f"（代替経路: {_src}）" if _src else ""
+            log_lines.append(f"      ✅ 商品名: {p.get('name','')[:40]}{_src_note}")
 
         # 公式サイト・連絡先
         # 優先1: KSプロジェクトページの creator.websites（複数URLを全試行）
@@ -524,7 +526,7 @@ if run:
             return row.get("掲載URL", "")
 
         summary_df = df[[
-            "優先度", "商品名", "メーカー名", "プラットフォーム",
+            "優先度", "判定の確度", "商品名", "メーカー名", "プラットフォーム",
             "調達額(円)", "日本で売れそうな理由", "掲載URL",
         ]].copy()
         summary_df["種別"] = df.apply(best_contact_type, axis=1)
@@ -534,6 +536,11 @@ if run:
         st.caption(
             "優先度 A → B → C の順に並んでいます。"
             "並び替え・コピーをしたい場合は下の「全カラムを表示」の表をご利用ください。"
+        )
+        st.caption(
+            "⚠ 参考値 … 調達額や説明文を自動取得できなかった商品です。"
+            "判定材料が少ないため、同じ商品でも判定が変わることがあります。"
+            "URLの後ろに半角スペース＋調達額を貼り付けて再実行すると精度が上がります。"
         )
 
         # st.dataframe は長文を折り返せないため、理由を全文表示できるHTMLテーブルで描画する
