@@ -236,7 +236,7 @@ with col_btn:
         "▶ リサーチ開始",
         type="primary",
         disabled=(len(urls) == 0),
-        use_container_width=True,
+        width="stretch",
     )
 with col_note:
     st.markdown(
@@ -509,7 +509,7 @@ if results:
         st.caption(f"検索日時: {_executed_txt} ／ 検索条件: "
                    f"{sstate.describe_query(st.session_state)}")
     with _col_clear:
-        if st.button("🗑 検索結果をクリア", use_container_width=True,
+        if st.button("🗑 検索結果をクリア", width="stretch",
                      help="表示中の検索結果・検索条件・エラー表示を消します（入力欄のURLは残ります）"):
             sstate.clear_results(st.session_state)
             st.rerun()
@@ -598,7 +598,7 @@ if results:
 
     # 全カラム展開表示
     with st.expander("全カラムを表示"):
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width="stretch", hide_index=True)
 
     # 営業メール一覧（全商品。優先度A→B→Cの順で表示）
     _badge = {"A": "🟢", "B": "🟡", "C": "🔴"}
