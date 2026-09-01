@@ -220,12 +220,17 @@ def test_prompt_passes_real_amounts():
     assert "1,200" in backers and "取得できず" not in backers, backers
 
 
-def test_prompt_temperature_is_zero():
-    """判定を安定させるため temperature=0 を指定している"""
+def test_prompt_does_not_pass_temperature():
+    """temperature を渡さない
+
+    新しい Anthropic SDK では messages.create から temperature が削除されており、
+    渡すと API へ送信される前に TypeError になって分析が全件失敗する。
+    実SDKとの引数整合は tests/test_sdk_compat.py で検証する。
+    """
     box = _capture_prompt({"name": "X", "maker": "M", "platform": "Kickstarter",
                            "raised_usd": 1, "raised_jpy": 1, "backers": 1,
                            "genre": "T", "url": "u", "description": "d"})
-    assert box.get("temperature") == 0, str(box.get("temperature"))
+    assert "temperature" not in box, str(box.get("temperature"))
 
 
 # ── サマリー表HTML ─────────────────────────────────────────────────────────────

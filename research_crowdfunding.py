@@ -697,8 +697,8 @@ def analyze_with_claude(project: Dict, client, sender_name: str = "", sender_com
             response = client.messages.create(
                 model=MODEL_ID,
                 max_tokens=1024,
-                # 同じ商品を再度かけたときに判定がぶれないよう固定する
-                temperature=0,
+                # temperature は渡さない。新しい Anthropic SDK では
+                # messages.create から削除されており、渡すと送信前に TypeError になる
                 messages=[{"role": "user", "content": prompt}],
             )
             raw = response.content[0].text.strip()
