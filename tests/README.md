@@ -7,6 +7,7 @@
 ```bash
 python tests/test_offline.py       # ネットワーク不要。まずこれを通す
 python tests/test_search_state.py  # 検索結果の保持（session_state）
+python tests/test_result_schema.py # 検索結果の列構成の正規化・旧セッションの移行
 python tests/test_app_render.py    # アプリ画面の描画（Streamlit の AppTest）
 python tests/test_sdk_compat.py    # 実 Anthropic SDK との引数互換（通信なし）
 python tests/test_network.py       # 外部サイトへ実アクセスする
@@ -21,6 +22,7 @@ python tests/test_network.py       # 外部サイトへ実アクセスする
 |---|---|---|
 | `test_offline.py` | なし（決定論的） | **コードの不具合**。必ず直す |
 | `test_search_state.py` | なし（決定論的） | **コードの不具合**。必ず直す |
+| `test_result_schema.py` | なし（決定論的） | **コードの不具合**。必ず直す |
 | `test_app_render.py` | なし（決定論的） | **コードの不具合**。必ず直す |
 | `test_sdk_compat.py` | インストール済みの Anthropic SDK | **SDKの破壊的変更**。渡している引数を直す |
 | `test_network.py` | 外部サイトの状態 | 掲載終了・仕様変更・IPブロックの可能性がある。コードの不具合とは限らないため、まず原因を切り分ける |
@@ -47,6 +49,8 @@ python tests/test_network.py       # 外部サイトへ実アクセスする
 - サマリー表HTMLの並び順・全文表示・HTMLエスケープ
 - Kickstarterの取得経路（本体／Kicktraq／stats.json）
 - **検索結果の保持**（再実行・失敗・クリア時のふるまい、セッション間の独立）
+- **列構成の正規化**（旧形式の結果を既定値で補い、表示時の KeyError を防ぐ）
+- **旧 session_state の移行**（列が増えたデプロイ後も開いたままのセッションが落ちない）
 
 ## 補足
 

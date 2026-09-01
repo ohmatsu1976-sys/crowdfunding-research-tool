@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from _harness import run  # noqa: E402
+import result_schema as rschema  # noqa: E402
 import search_state as sstate  # noqa: E402
 
 from streamlit.testing.v1 import AppTest  # noqa: E402
@@ -46,6 +47,8 @@ def _seeded_app(rows, query, status=sstate.STATUS_OK, error="") -> AppTest:
     at.session_state[sstate.ERROR] = error
     at.session_state[sstate.FAILED_URLS] = []
     at.session_state[sstate.LOG] = []
+    at.session_state[sstate.SCHEMA] = rschema.SCHEMA_VERSION
+    at.session_state[sstate.NOTICE] = ""
     return at.run()
 
 
@@ -147,6 +150,55 @@ def test_unrelated_interaction_keeps_results():
     at.text_input[0].set_value("Taro Yamada").run()
     assert not at.exception, str(at.exception)
     assert "残る商品" in _text(at), "無関係な操作で結果が消えた"
+
+
+# ── 旧形式セッションからの復帰 ────────────────────────────────────────────────
+
+def _old_session(rows, schema=None) -> AppTest:
+    """列構成が変わる前のセッションを模す（スキーマ版を記録していない状態）"""
+    at = AppTest.from_file(APP, default_timeout=TIMEOUT)
+    at.session_state[sstate.RESULTS] = rows
+    at.session_state[sstate.QUERY] = ["https://example.com/p"]
+    at.session_state[sstate.EXECUTED_AT] = datetime(2026, 1, 2, 3, 4)
+    at.session_state[sstate.STATUS] = sstate.STATUS_OK
+    at.session_state[sstate.ERROR] = ""
+    at.session_state[sstate.FAILED_URLS] = []
+    at.session_state[sstate.LOG] = []
+    if schema is not None:
+        at.session_state[sstate.SCHEMA] = schema
+    return at.run()
+
+
+def test_old_format_session_does_not_crash():
+    """列が足りない旧形式の結果が残っていても KeyError で落ちない"""
+    row = _row("旧形式の商品", "A")
+    row.pop("判定の確度")
+    row.pop("LinkedIn")
+    at = _old_session([row], schema=1)
+    assert not at.exception, str(at.exception)
+    body = _text(at)
+    assert "旧形式の商品" in body, "旧形式の結果が表示されていない"
+    assert "判定の確度" in body, "補った項目が利用者に伝わっていない"
+
+
+def test_broken_session_is_reset_with_explanation():
+    """移行できない結果は、白紙やKeyErrorではなく説明を出して初期化する"""
+    at = _old_session(["これは行ではない"], schema=1)
+    assert not at.exception, str(at.exception)
+    body = _text(at)
+    assert "初期化" in body, "初期化した理由が説明されていない"
+    assert at.session_state[sstate.RESULTS] == [], "結果が残っている"
+
+
+def test_migration_notice_is_not_repeated():
+    """移行の説明は一度出したら繰り返さない"""
+    row = _row("旧形式の商品", "A")
+    row.pop("判定の確度")
+    at = _old_session([row], schema=1)
+    at = at.text_input[0].set_value("Taro Yamada").run()
+    assert not at.exception, str(at.exception)
+    assert "そろえました" not in _text(at), "移行の説明が出続けている"
+    assert "旧形式の商品" in _text(at), "移行後の結果が消えた"
 
 
 if __name__ == "__main__":

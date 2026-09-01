@@ -20,7 +20,6 @@ import streamlit as st  # pandas は結果表示時に遅延import（起動高�
 sys.path.insert(0, str(Path(__file__).parent))
 from research_crowdfunding import (
     API_WAIT_SEC,
-    CSV_FIELDS,
     MAX_RAISED_USD,
     MIN_RAISED_USD,
     JPY_PER_USD,
@@ -32,6 +31,7 @@ from research_crowdfunding import (
     get_contact_info,
 )
 from summary_table import build_summary_html
+import result_schema as rschema
 import search_state as sstate
 
 # ── ページ設定 ──────────────────────────────────────────────────────────────────
@@ -45,6 +45,8 @@ st.set_page_config(
 
 # 検索結果はセッション単位で保持する（操作のたびの再実行で消えないようにする）
 sstate.init_state(st.session_state)
+# 列構成が変わったデプロイの後でも、開きっぱなしのセッションが落ちないようにする
+sstate.migrate_state(st.session_state, rschema.normalize_rows, rschema.SCHEMA_VERSION)
 
 # ── スタイル ────────────────────────────────────────────────────────────────────
 
@@ -446,7 +448,8 @@ if run:
 
     # 検索が正常終了したときだけ結果を差し替える（途中経過や失敗は保存しない）
     if not sstate.save_success(st.session_state, results, urls,
-                               failed_urls=errors, log_lines=log_lines):
+                               failed_urls=errors, log_lines=log_lines,
+                               schema_version=rschema.SCHEMA_VERSION):
         sstate.record_failure(
             st.session_state,
             "分析できた商品が0件でした。URLを確認してください。",
@@ -454,6 +457,11 @@ if run:
 
 # ── Step 3: 結果表示 ────────────────────────────────────────────────────────────
 # 検索結果は session_state から読む。ボタン操作などで再実行されても消えない
+
+_notice = sstate.get_notice(st.session_state)
+if _notice:
+    st.info(_notice, icon="ℹ️")
+    sstate.clear_notice(st.session_state)
 
 _error_msg = sstate.get_error(st.session_state)
 if _error_msg:
@@ -514,7 +522,16 @@ if results:
             sstate.clear_results(st.session_state)
             st.rerun()
 
-    df = pd.DataFrame(results, columns=CSV_FIELDS)
+    # DataFrame へ変換する境界で行のスキーマをそろえる（表示側で握り潰さない）
+    _rows, _missing_cols = rschema.normalize_rows(results)
+    if _missing_cols:
+        st.warning(
+            "表示中の検索結果に不足していた項目を、既定値で補いました: "
+            + "、".join(_missing_cols)
+            + "。正確な内容は再検索してご確認ください。",
+            icon="⚠️",
+        )
+    df = pd.DataFrame(_rows, columns=rschema.required_columns())
 
     # 優先度サマリー
     c1, c2, c3, c4 = st.columns(4)
@@ -572,10 +589,9 @@ if results:
         # 最終フォールバック: プロジェクトページ（必ず存在する）
         return row.get("掲載URL", "")
 
-    summary_df = df[[
-        "優先度", "判定の確度", "商品名", "メーカー名", "プラットフォーム",
-        "調達額(円)", "日本で売れそうな理由", "掲載URL",
-    ]].copy()
+    # 正規化済みなので通常はすべて揃っている。想定外の欠落でページごと落とさないよう、
+    # 列の選択は KeyError を投げない reindex で行う（原因は上の警告で明示する）
+    summary_df = df.reindex(columns=rschema.DISPLAY_COLUMNS).copy()
     summary_df["種別"] = df.apply(best_contact_type, axis=1)
     summary_df["アプローチ先リンク"] = df.apply(best_contact_url, axis=1)
 
