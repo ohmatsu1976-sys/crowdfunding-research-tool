@@ -752,7 +752,9 @@ def is_low_confidence(p: Dict) -> bool:
 def build_row(p: Dict, analysis: Dict, contact: Dict) -> Dict:
     return {
         "商品名":              p.get("name", ""),
-        "メーカー名":          p.get("maker", ""),
+        # 内部の maker は空のままにする（英文営業メールでは [Brand / Team Name] に
+        # 置き換わるため）。表示・CSVでだけ「不明」と明示する
+        "メーカー名":          p.get("maker", "") or "不明",
         "掲載URL":             p.get("url", ""),
         "プラットフォーム":    p.get("platform", ""),
         "調達額(円)":          p.get("raised_jpy", 0),
@@ -1061,9 +1063,11 @@ def _fetch_ks_via_fallback(base_url: str, creator_slug: str, product_slug: str) 
         project.update(stats)
         project["_source"] = "stats.json"
         project["_partial"] = True      # 商品名・メーカー名はスラグからの推定
-        # 商品名は取得できないためスラグから整形する
-        project["name"] = " ".join(w.capitalize() for w in product_slug.replace("-", " ").split())
-        project["maker"] = "" if creator_slug.isdigit() else creator_slug
+        # 商品名・メーカー名は取得できないため、既存のURL推定ロジックを再利用する。
+        # これによりアカウント名が一般語（例: rest）の場合も誤ったメーカー名にならない
+        slug_info = _extract_from_slug(base_url)
+        project["name"]  = slug_info.get("name", "") or project["name"]
+        project["maker"] = slug_info.get("maker", "")
         print(f"  [KS] stats.json から調達額を取得: ${stats['raised_usd']:,.0f}")
         return project
 
@@ -1437,6 +1441,21 @@ _BRAND_STOPWORDS = {
     "project", "product", "official", "site", "web", "go", "get", "make",
 }
 
+
+def usable_maker(candidate: str) -> str:
+    """メーカー名として確定表示してよい文字列だけを返す（不可なら空文字）
+
+    Kickstarterのアカウント名は「rest」のような一般語のことがあり、
+    そのままメーカー名にすると誤った社名を表示してしまう。判定は
+    _BRAND_STOPWORDS（既存の一般語リスト）に一本化する。
+    """
+    value = (candidate or "").strip()
+    if not value or value.isdigit():
+        return ""
+    if value.lower() in _BRAND_STOPWORDS:
+        return ""
+    return value
+
 # 商品名から特徴語を作るときに落とす語（宣伝文句・プラットフォーム名など）
 _GENERIC_TOKENS = {
     "the", "and", "for", "with", "your", "our", "this", "that", "from",
@@ -1661,41 +1680,38 @@ def _extract_from_slug(url: str) -> Dict:
     base = url.split("?")[0].rstrip("/")
     slug = base.split("/")[-1]
     creator = _extract_creator_from_ks_url(url)
-    # 数値IDはメーカー名として不適切なので空にする
-    maker = "" if str(creator).isdigit() else creator
+    # 一般語・数値IDはメーカー名として採用しない（判定は usable_maker に一本化）
+    maker = usable_maker(creator)
     # ハイフン区切りを単語に変換して商品名を推定
     name = " ".join(w.capitalize() for w in slug.replace("-", " ").split())
 
-    # 一般冠詞・無意味な先頭語の除外リスト（ブランド名抽出時に使用）
-    _STOPWORDS = {"the", "a", "an", "my", "your", "our", "this", "that",
-                  "new", "smart", "ai", "for", "of"}
+    def _brand_from_slug() -> str:
+        """商品スラグの先頭語をブランド名候補として取り出す（採用可否も同じ基準で判定）"""
+        if "-" not in slug:
+            return ""
+        first_word = slug.split("-")[0]
+        if len(first_word) < 3:
+            return ""
+        return usable_maker(first_word).capitalize()
 
     if "kickstarter.com" in url:
         platform = "Kickstarter"
         # KSのアカウント名はブランド名とは限らない（例: /projects/rest/sitpack-zen…）。
-        # 一般語だった場合は商品スラグの先頭語をブランド名候補として採用する
-        if (not maker or maker.lower() in _STOPWORDS
-                or maker.lower() in _BRAND_STOPWORDS) and "-" in slug:
-            first_word = slug.split("-")[0].lower()
-            if len(first_word) >= 3 and first_word not in _STOPWORDS:
-                maker = first_word.capitalize()
+        # 採用できない場合は商品スラグの先頭語をブランド名候補にする
+        if not maker:
+            maker = _brand_from_slug()
     elif "zeczec.com" in url:
         platform = "ZECZEC"
         # ZECZECはスラグの先頭単語がブランド名のことが多い（例: kieslect-ai-watch → kieslect）
-        # creator が取れていない場合のみ、スラグ先頭からブランド名を推定
-        if not creator and "-" in slug:
-            first_word = slug.split("-")[0].lower()
-            if first_word and first_word not in _STOPWORDS and len(first_word) >= 3:
-                creator = first_word
-                maker = first_word.capitalize()
+        if not maker:
+            maker = _brand_from_slug()
+            creator = maker.lower() or creator
     else:
         platform = "Indiegogo"
         # Indiegogoの旧形式URL（creator不在）でも先頭単語をブランド名として推定
-        if not creator and "-" in slug:
-            first_word = slug.split("-")[0].lower()
-            if first_word and first_word not in _STOPWORDS and len(first_word) >= 3:
-                creator = first_word
-                maker = first_word.capitalize()
+        if not maker:
+            maker = _brand_from_slug()
+            creator = maker.lower() or creator
     return {
         "platform": platform, "name": name, "maker": maker,
         "url": base, "raised_usd": 0, "raised_jpy": 0,

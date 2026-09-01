@@ -5,7 +5,8 @@
 output/
 
 # テスト・一時ファイル
-test_*.py
+# ルート直下の探索用スクリプトのみ除外（tests/ 配下の回帰テストは追跡する）
+/test_*.py
 __pycache__/
 *.pyc
 *.pyo
