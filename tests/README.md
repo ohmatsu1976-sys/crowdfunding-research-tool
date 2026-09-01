@@ -5,19 +5,26 @@
 ## 実行方法
 
 ```bash
-python tests/test_offline.py     # ネットワーク不要。まずこれを通す
-python tests/test_network.py     # 外部サイトへ実アクセスする
+python tests/test_offline.py       # ネットワーク不要。まずこれを通す
+python tests/test_search_state.py  # 検索結果の保持（session_state）
+python tests/test_app_render.py    # アプリ画面の描画（Streamlit の AppTest）
+python tests/test_network.py       # 外部サイトへ実アクセスする
 ```
 
 追加パッケージは不要です（pytest があれば `pytest tests/` でも動きます）。
-どちらも失敗があると終了コードが 0 以外になります。
+いずれも失敗があると終了コードが 0 以外になります。
 
-## 2つに分けている理由
+## テストを分けている理由
 
 | ファイル | 依存 | 失敗したときの意味 |
 |---|---|---|
 | `test_offline.py` | なし（決定論的） | **コードの不具合**。必ず直す |
+| `test_search_state.py` | なし（決定論的） | **コードの不具合**。必ず直す |
+| `test_app_render.py` | なし（決定論的） | **コードの不具合**。必ず直す |
 | `test_network.py` | 外部サイトの状態 | 掲載終了・仕様変更・IPブロックの可能性がある。コードの不具合とは限らないため、まず原因を切り分ける |
+
+`test_app_render.py` は Streamlit 同梱の `st.testing.v1.AppTest` を使う。
+ブラウザも追加パッケージも不要で、検索を実行しないため外部AI APIも呼ばない。
 
 ## テストしないこと
 
@@ -35,6 +42,7 @@ python tests/test_network.py     # 外部サイトへ実アクセスする
 - AI分析プロンプトの欠損表記と `temperature=0`
 - サマリー表HTMLの並び順・全文表示・HTMLエスケープ
 - Kickstarterの取得経路（本体／Kicktraq／stats.json）
+- **検索結果の保持**（再実行・失敗・クリア時のふるまい、セッション間の独立）
 
 ## 補足
 

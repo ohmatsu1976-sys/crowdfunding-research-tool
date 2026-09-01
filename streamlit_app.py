@@ -32,6 +32,7 @@ from research_crowdfunding import (
     get_contact_info,
 )
 from summary_table import build_summary_html
+import search_state as sstate
 
 # ── ページ設定 ──────────────────────────────────────────────────────────────────
 
@@ -41,6 +42,9 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# 検索結果はセッション単位で保持する（操作のたびの再実行で消えないようにする）
+sstate.init_state(st.session_state)
 
 # ── スタイル ────────────────────────────────────────────────────────────────────
 
@@ -241,24 +245,27 @@ with col_note:
     )
 
 if run:
-    import pandas as pd  # 結果表示・CSV出力に使用（ここで初めて読み込む）
-
     # APIキー取得
     try:
         api_key = st.secrets["ANTHROPIC_API_KEY"]
     except (KeyError, FileNotFoundError):
-        st.error(
-            "⚠️ APIキーが設定されていません。"
-            "管理者に問い合わせるか、.streamlit/secrets.toml に ANTHROPIC_API_KEY を設定してください。"
+        # 失敗を記録して再描画する。以前の正常な結果は消さずに表示を続ける
+        sstate.record_failure(
+            st.session_state,
+            "APIキーが設定されていません。管理者に問い合わせるか、"
+            ".streamlit/secrets.toml に ANTHROPIC_API_KEY を設定してください。",
         )
-        st.stop()
+        st.rerun()
 
     try:
         import anthropic as _anthropic
         client = _anthropic.Anthropic(api_key=api_key)
     except ImportError:
-        st.error("anthropic パッケージがインストールされていません: pip install anthropic")
-        st.stop()
+        sstate.record_failure(
+            st.session_state,
+            "anthropic パッケージがインストールされていません: pip install anthropic",
+        )
+        st.rerun()
 
     # Claude API 接続テスト（過負荷時は最大3回リトライ）
     with st.spinner("Claude API 接続確認中..."):
@@ -282,11 +289,14 @@ if run:
         if _last_err:
             _is_overload = "529" in str(_last_err) or "overloaded" in str(_last_err).lower()
             if _is_overload:
-                st.warning("⚠️ Claude API が一時的に混雑しています。少し待ってから再度「▶ リサーチ開始」を押してください。")
+                _msg = ("Claude API が一時的に混雑しています。"
+                        "少し待ってから再度「▶ リサーチ開始」を押してください。")
             else:
-                st.error(f"⚠️ Claude API 接続エラー: {_last_err}")
-                st.caption("Streamlit Cloud の Secrets に ANTHROPIC_API_KEY が正しく設定されているか確認してください。")
-            st.stop()
+                _msg = (f"Claude API 接続エラー: {_last_err}／"
+                        "Streamlit Cloud の Secrets に ANTHROPIC_API_KEY が"
+                        "正しく設定されているか確認してください。")
+            sstate.record_failure(st.session_state, _msg)
+            st.rerun()
 
     # 送信者情報をsession_stateに保持してClaude分析に渡す
     _sender_name    = sender_name    if sender_name    else "【氏名】"
@@ -434,154 +444,189 @@ if run:
     status_text.empty()
     log_area.empty()
 
-    # 処理ログを折りたたみで残す（デバッグ用）
-    if log_lines:
-        with st.expander("処理ログ（デバッグ）", expanded=False):
-            st.code("\n".join(log_lines))
-
-    if errors:
-        st.warning(f"取得できなかったURL: {len(errors)}件\n" + "\n".join(errors))
-
-    # スラグ推定モードの件数確認
-    slug_mode_count = sum(1 for r in results if any(
-        r.get("調達額(円)", 0) == 0 and r.get("調達額(USD)", 0) == 0
-        for _ in [1]
-    ))
-    from_slug_urls = [e["url"] for e in targets if e["url"] in
-                      [r.get("掲載URL","") for r in results if r.get("調達額(USD)", 1) == 0]]
-    if slug_mode_count > 0:
-        st.info(
-            f"💡 **{slug_mode_count}件** はページから情報を取得できず、**URLから推定**しています。\n\n"
-            "この場合、**調達額は0**、**メーカー名はURLからの推定値**です。"
-            "メーカー名は正式な社名と異なることがあるため、必ずご自身で確認してください。\n\n"
-            "**Indiegogo**: 2025年以降、APIが廃止されデータ取得不可のため調達額は手動入力してください。\n"
-            "**Kickstarter**: クラウドサーバーIPがブロックされる場合があります。\n\n"
-            "URLの後ろに半角スペース＋金額を追加すると反映されます。\n"
-            "例: `https://www.indiegogo.com/projects/xxx  $57,485`",
-            icon="💡",
+    # 検索が正常終了したときだけ結果を差し替える（途中経過や失敗は保存しない）
+    if not sstate.save_success(st.session_state, results, urls,
+                               failed_urls=errors, log_lines=log_lines):
+        sstate.record_failure(
+            st.session_state,
+            "分析できた商品が0件でした。URLを確認してください。",
         )
 
-    # ── Step 3: 結果表示 ────────────────────────────────────────────────────────
+# ── Step 3: 結果表示 ────────────────────────────────────────────────────────────
+# 検索結果は session_state から読む。ボタン操作などで再実行されても消えない
 
-    if results:
-        st.divider()
-        st.subheader(f"Step 3　分析結果　（{len(results)} 件）")
+_error_msg = sstate.get_error(st.session_state)
+if _error_msg:
+    st.error(f"⚠️ {_error_msg}")
 
-        df = pd.DataFrame(results, columns=CSV_FIELDS)
+results   = sstate.get_results(st.session_state)
+errors    = st.session_state.get(sstate.FAILED_URLS, [])
+log_lines = st.session_state.get(sstate.LOG, [])
 
-        # 優先度サマリー
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            st.metric("合計", f"{len(df)}件")
-        with c2:
-            cnt_a = int((df["優先度"] == "A").sum())
-            st.metric("優先度 A 🟢", f"{cnt_a}件", help="コンセプト強・日本未展開・Makuake向き")
-        with c3:
-            cnt_b = int((df["優先度"] == "B").sum())
-            st.metric("優先度 B 🟡", f"{cnt_b}件", help="良品だが日本展開済みの可能性あり")
-        with c4:
-            cnt_c = int((df["優先度"] == "C").sum())
-            st.metric("優先度 C 🔴", f"{cnt_c}件", help="規制・価格・競合に懸念あり")
+# 処理ログを折りたたみで残す（デバッグ用）
+if log_lines:
+    with st.expander("処理ログ（デバッグ）", expanded=False):
+        st.code("\n".join(log_lines))
 
-        st.markdown("---")
+if errors:
+    st.warning(f"取得できなかったURL: {len(errors)}件\n" + "\n".join(errors))
 
-        # サマリーテーブル（主要カラムのみ）
-        def best_contact_type(row):
-            if row["メールアドレス"] not in ("未確認", ""):
-                return "📧 メール"
-            if row["問い合わせフォームURL"] not in ("未確認", ""):
-                return "📝 フォーム"
-            if row["LinkedIn"] not in ("未確認", ""):
-                return "💼 LinkedIn"
-            if row["Facebook"] not in ("未確認", ""):
-                return "📘 Facebook"
-            if row["Instagram"] not in ("未確認", ""):
-                return "📷 Instagram"
-            if row["公式サイトURL"] not in ("", "未確認"):
-                return "🌐 公式サイト"
-            if row["掲載URL"] not in ("", "未確認"):
-                plat = row.get("プラットフォーム", "")
-                if plat == "Indiegogo":
-                    return "📋 IGGページ"
-                elif plat == "ZECZEC":
-                    return "📋 ZECZECページ"
-                else:
-                    return "📋 KSページ"
-            return "—"
+# スラグ推定モードの件数確認
+slug_mode_count = sum(1 for r in results if any(
+    r.get("調達額(円)", 0) == 0 and r.get("調達額(USD)", 0) == 0
+    for _ in [1]
+))
+if slug_mode_count > 0:
+    st.info(
+        f"💡 **{slug_mode_count}件** はページから情報を取得できず、**URLから推定**しています。\n\n"
+        "この場合、**調達額は0**、**メーカー名はURLからの推定値**です。"
+        "メーカー名は正式な社名と異なることがあるため、必ずご自身で確認してください。\n\n"
+        "**Indiegogo**: 2025年以降、APIが廃止されデータ取得不可のため調達額は手動入力してください。\n"
+        "**Kickstarter**: クラウドサーバーIPがブロックされる場合があります。\n\n"
+        "URLの後ろに半角スペース＋金額を追加すると反映されます。\n"
+        "例: `https://www.indiegogo.com/projects/xxx  $57,485`",
+        icon="💡",
+    )
 
-        def best_contact_url(row):
-            if row["メールアドレス"] not in ("未確認", ""):
-                return "mailto:" + row["メールアドレス"]
-            if row["問い合わせフォームURL"] not in ("未確認", ""):
-                return row["問い合わせフォームURL"]
-            if row["LinkedIn"] not in ("未確認", ""):
-                return row["LinkedIn"]
-            if row["Facebook"] not in ("未確認", ""):
-                return row["Facebook"]
-            if row["Instagram"] not in ("未確認", ""):
-                return row["Instagram"]
-            if row["公式サイトURL"] not in ("", "未確認"):
-                return row["公式サイトURL"]
-            # 最終フォールバック: プロジェクトページ（必ず存在する）
-            return row.get("掲載URL", "")
+if results:
+    import pandas as pd  # 表示・CSV出力に使用（ここで初めて読み込む）
 
-        summary_df = df[[
-            "優先度", "判定の確度", "商品名", "メーカー名", "プラットフォーム",
-            "調達額(円)", "日本で売れそうな理由", "掲載URL",
-        ]].copy()
-        summary_df["種別"] = df.apply(best_contact_type, axis=1)
-        summary_df["アプローチ先リンク"] = df.apply(best_contact_url, axis=1)
+    st.divider()
+    st.subheader(f"Step 3　分析結果　（{len(results)} 件）")
 
-        st.markdown("**サマリー（主要項目）**")
+    # この結果がどの検索によるものかを明示する
+    _executed_at = sstate.get_executed_at(st.session_state)
+    _executed_txt = _executed_at.strftime("%Y-%m-%d %H:%M") if _executed_at else "不明"
+    if sstate.is_showing_previous(st.session_state):
+        st.warning(
+            f"⚠️ 下に表示しているのは **前回（{_executed_txt}）の検索結果** です。"
+            "直近の検索は失敗したため、結果は置き換わっていません。"
+            "CSVもこの前回の結果を出力します。",
+            icon="⚠️",
+        )
+    _col_info, _col_clear = st.columns([4, 1])
+    with _col_info:
+        st.caption(f"検索日時: {_executed_txt} ／ 検索条件: "
+                   f"{sstate.describe_query(st.session_state)}")
+    with _col_clear:
+        if st.button("🗑 検索結果をクリア", use_container_width=True,
+                     help="表示中の検索結果・検索条件・エラー表示を消します（入力欄のURLは残ります）"):
+            sstate.clear_results(st.session_state)
+            st.rerun()
+
+    df = pd.DataFrame(results, columns=CSV_FIELDS)
+
+    # 優先度サマリー
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("合計", f"{len(df)}件")
+    with c2:
+        cnt_a = int((df["優先度"] == "A").sum())
+        st.metric("優先度 A 🟢", f"{cnt_a}件", help="コンセプト強・日本未展開・Makuake向き")
+    with c3:
+        cnt_b = int((df["優先度"] == "B").sum())
+        st.metric("優先度 B 🟡", f"{cnt_b}件", help="良品だが日本展開済みの可能性あり")
+    with c4:
+        cnt_c = int((df["優先度"] == "C").sum())
+        st.metric("優先度 C 🔴", f"{cnt_c}件", help="規制・価格・競合に懸念あり")
+
+    st.markdown("---")
+
+    # サマリーテーブル（主要カラムのみ）
+    def best_contact_type(row):
+        if row["メールアドレス"] not in ("未確認", ""):
+            return "📧 メール"
+        if row["問い合わせフォームURL"] not in ("未確認", ""):
+            return "📝 フォーム"
+        if row["LinkedIn"] not in ("未確認", ""):
+            return "💼 LinkedIn"
+        if row["Facebook"] not in ("未確認", ""):
+            return "📘 Facebook"
+        if row["Instagram"] not in ("未確認", ""):
+            return "📷 Instagram"
+        if row["公式サイトURL"] not in ("", "未確認"):
+            return "🌐 公式サイト"
+        if row["掲載URL"] not in ("", "未確認"):
+            plat = row.get("プラットフォーム", "")
+            if plat == "Indiegogo":
+                return "📋 IGGページ"
+            elif plat == "ZECZEC":
+                return "📋 ZECZECページ"
+            else:
+                return "📋 KSページ"
+        return "—"
+
+    def best_contact_url(row):
+        if row["メールアドレス"] not in ("未確認", ""):
+            return "mailto:" + row["メールアドレス"]
+        if row["問い合わせフォームURL"] not in ("未確認", ""):
+            return row["問い合わせフォームURL"]
+        if row["LinkedIn"] not in ("未確認", ""):
+            return row["LinkedIn"]
+        if row["Facebook"] not in ("未確認", ""):
+            return row["Facebook"]
+        if row["Instagram"] not in ("未確認", ""):
+            return row["Instagram"]
+        if row["公式サイトURL"] not in ("", "未確認"):
+            return row["公式サイトURL"]
+        # 最終フォールバック: プロジェクトページ（必ず存在する）
+        return row.get("掲載URL", "")
+
+    summary_df = df[[
+        "優先度", "判定の確度", "商品名", "メーカー名", "プラットフォーム",
+        "調達額(円)", "日本で売れそうな理由", "掲載URL",
+    ]].copy()
+    summary_df["種別"] = df.apply(best_contact_type, axis=1)
+    summary_df["アプローチ先リンク"] = df.apply(best_contact_url, axis=1)
+
+    st.markdown("**サマリー（主要項目）**")
+    st.caption(
+        "優先度 A → B → C の順に並んでいます。"
+        "並び替え・コピーをしたい場合は下の「全カラムを表示」の表をご利用ください。"
+    )
+    st.caption(
+        "⚠ 参考値 … 調達額や説明文を自動取得できなかった商品です。"
+        "判定材料が少ないため、同じ商品でも判定が変わることがあります。"
+        "URLの後ろに半角スペース＋調達額を貼り付けて再実行すると精度が上がります。"
+    )
+
+    # st.dataframe は長文を折り返せないため、理由を全文表示できるHTMLテーブルで描画する
+    st.markdown(
+        build_summary_html(summary_df.to_dict("records")),
+        unsafe_allow_html=True,
+    )
+
+    # 全カラム展開表示
+    with st.expander("全カラムを表示"):
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+    # 営業メール一覧（全商品。優先度A→B→Cの順で表示）
+    _badge = {"A": "🟢", "B": "🟡", "C": "🔴"}
+    df_mail = df.sort_values("優先度")
+    with st.expander(f"✉️ 営業メール文（全{len(df_mail)}件）", expanded=True):
         st.caption(
-            "優先度 A → B → C の順に並んでいます。"
-            "並び替え・コピーをしたい場合は下の「全カラムを表示」の表をご利用ください。"
+            "署名が [Your Name] の場合は、ご自身のお名前に差し替えてご利用ください。"
+            "宛名が [Brand / Team Name] の場合も同様に差し替えてください。"
         )
-        st.caption(
-            "⚠ 参考値 … 調達額や説明文を自動取得できなかった商品です。"
-            "判定材料が少ないため、同じ商品でも判定が変わることがあります。"
-            "URLの後ろに半角スペース＋調達額を貼り付けて再実行すると精度が上がります。"
-        )
+        for _, row in df_mail.iterrows():
+            mark = _badge.get(row["優先度"], "")
+            st.markdown(f"**{mark} {row['商品名']}** — {row['メーカー名']}")
+            st.markdown(f"To: `{row['メールアドレス']}`")
+            st.markdown(f"**Subject:** {row['営業メール件名(英語)']}")
+            st.code(row["営業メール本文(英語)"], language=None)
+            st.divider()
 
-        # st.dataframe は長文を折り返せないため、理由を全文表示できるHTMLテーブルで描画する
-        st.markdown(
-            build_summary_html(summary_df.to_dict("records")),
-            unsafe_allow_html=True,
-        )
-
-        # 全カラム展開表示
-        with st.expander("全カラムを表示"):
-            st.dataframe(df, use_container_width=True, hide_index=True)
-
-        # 営業メール一覧（全商品。優先度A→B→Cの順で表示）
-        _badge = {"A": "🟢", "B": "🟡", "C": "🔴"}
-        df_mail = df.sort_values("優先度")
-        with st.expander(f"✉️ 営業メール文（全{len(df_mail)}件）", expanded=True):
-            st.caption(
-                "署名が [Your Name] の場合は、ご自身のお名前に差し替えてご利用ください。"
-                "宛名が [Brand / Team Name] の場合も同様に差し替えてください。"
-            )
-            for _, row in df_mail.iterrows():
-                mark = _badge.get(row["優先度"], "")
-                st.markdown(f"**{mark} {row['商品名']}** — {row['メーカー名']}")
-                st.markdown(f"To: `{row['メールアドレス']}`")
-                st.markdown(f"**Subject:** {row['営業メール件名(英語)']}")
-                st.code(row["営業メール本文(英語)"], language=None)
-                st.divider()
-
-        # CSV ダウンロード
-        csv_bytes = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
-        ts = pd.Timestamp.now().strftime("%Y%m%d_%H%M")
-        st.download_button(
-            label="📥 CSVダウンロード（Google スプレッドシート対応）",
-            data=csv_bytes,
-            file_name=f"crowdfunding_research_{ts}.csv",
-            mime="text/csv",
-            type="primary",
-        )
-    else:
-        st.error("分析できた商品が0件でした。URLを確認してください。")
-
+    # CSV ダウンロード
+    csv_bytes = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+    # 現在時刻ではなく、表示中の結果を取得した日時をファイル名にする
+    ts = sstate.timestamp_label(st.session_state)
+    st.download_button(
+        label="📥 CSVダウンロード（Google スプレッドシート対応）",
+        data=csv_bytes,
+        file_name=f"crowdfunding_research_{ts}.csv",
+        mime="text/csv",
+        type="primary",
+    )
 # ── フッター ────────────────────────────────────────────────────────────────────
 
 st.divider()
