@@ -16,6 +16,7 @@ import inspect
 import sys
 
 from _harness import run  # noqa: E402
+import auth  # noqa: E402
 import research_crowdfunding as r  # noqa: E402
 
 # アプリが現時点で messages.create に渡している引数（増減したら気づけるようにする）
@@ -110,6 +111,65 @@ def test_kwarg_set_is_unchanged():
 def test_model_id_is_accepted_as_string():
     """MODEL_ID が文字列として定義されている（SDKはモデル名を文字列で受ける）"""
     assert isinstance(r.MODEL_ID, str) and r.MODEL_ID.strip()
+
+
+# ── Supabase SDK との整合 ─────────────────────────────────────────────────────
+# 認証は通信せず、メソッドのシグネチャに対する束縛検査だけを行う。
+# クライアントの生成自体は通信を伴わない（URL・キーはダミー）。
+
+def _supabase_client():
+    import supabase
+    return supabase.create_client("https://example.supabase.co",
+                                  "sb_publishable_dummy-not-a-real-key")
+
+
+def _bind(func, *args, **kwargs):
+    try:
+        inspect.signature(func).bind(*args, **kwargs)
+    except TypeError as e:
+        raise AssertionError(f"実SDKが引数を受け付けない: {func.__name__}: {e}") from None
+
+
+def test_create_client_signature():
+    """create_client に URL とキーを渡せる"""
+    import supabase
+    _bind(supabase.create_client, "https://example.supabase.co", "sb_publishable_dummy")
+
+
+def test_sign_in_with_password_signature():
+    """ログインの引数が実SDKで受け付けられる"""
+    client = _supabase_client()
+    _bind(client.auth.sign_in_with_password,
+          {"email": "a@example.com", "password": "dummy-password"})
+
+
+def test_set_session_signature():
+    """セッション復元の引数が実SDKで受け付けられる（将来のRLS用）"""
+    client = _supabase_client()
+    _bind(client.auth.set_session, "dummy-access", "dummy-refresh")
+
+
+def test_update_user_signature():
+    """パスワードと user_metadata の更新が実SDKで受け付けられる"""
+    client = _supabase_client()
+    _bind(client.auth.update_user,
+          {"password": "dummy-password", "data": {auth.PASSWORD_CHANGED_FLAG: True}})
+
+
+def test_sign_out_signature():
+    """ログアウトが引数なしで呼べる"""
+    _bind(_supabase_client().auth.sign_out)
+
+
+def test_unknown_supabase_kwarg_is_rejected():
+    """未知の引数を足すと bind に失敗する（検査が機能していることの確認）"""
+    client = _supabase_client()
+    try:
+        inspect.signature(client.auth.set_session).bind(
+            "a", "b", definitely_not_a_real_parameter=1)
+    except TypeError:
+        return
+    raise AssertionError("未知の引数が通ってしまい、互換検査が機能していない")
 
 
 if __name__ == "__main__":

@@ -10,3 +10,4 @@ requests==2.34.2
 beautifulsoup4==4.15.0
 pandas==3.0.5
 cloudscraper==1.2.71
+supabase==2.31.0

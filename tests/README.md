@@ -8,6 +8,7 @@
 python tests/test_offline.py       # ネットワーク不要。まずこれを通す
 python tests/test_search_state.py  # 検索結果の保持（session_state）
 python tests/test_result_schema.py # 検索結果の列構成の正規化・旧セッションの移行
+python tests/test_auth.py          # メール＋パスワード認証（偽クライアント）
 python tests/test_app_render.py    # アプリ画面の描画（Streamlit の AppTest）
 python tests/test_sdk_compat.py    # 実 Anthropic SDK との引数互換（通信なし）
 python tests/test_network.py       # 外部サイトへ実アクセスする
@@ -23,8 +24,9 @@ python tests/test_network.py       # 外部サイトへ実アクセスする
 | `test_offline.py` | なし（決定論的） | **コードの不具合**。必ず直す |
 | `test_search_state.py` | なし（決定論的） | **コードの不具合**。必ず直す |
 | `test_result_schema.py` | なし（決定論的） | **コードの不具合**。必ず直す |
+| `test_auth.py` | なし（決定論的） | **コードの不具合**。必ず直す |
 | `test_app_render.py` | なし（決定論的） | **コードの不具合**。必ず直す |
-| `test_sdk_compat.py` | インストール済みの Anthropic SDK | **SDKの破壊的変更**。渡している引数を直す |
+| `test_sdk_compat.py` | インストール済みの Anthropic / Supabase SDK | **SDKの破壊的変更**。渡している引数を直す |
 | `test_network.py` | 外部サイトの状態 | 掲載終了・仕様変更・IPブロックの可能性がある。コードの不具合とは限らないため、まず原因を切り分ける |
 
 `test_app_render.py` は Streamlit 同梱の `st.testing.v1.AppTest` を使う。
@@ -32,6 +34,8 @@ python tests/test_network.py       # 外部サイトへ実アクセスする
 
 ## テストしないこと
 
+- **Supabase へも通信しません。** 認証は偽クライアントで検証しています
+  （`test_sdk_compat.py` はシグネチャを `inspect` で調べるだけで、実際のログインは行いません）
 - **外部AI API（Anthropic）は呼びません。** プロンプトの組み立ては偽クライアントで捕捉して検証しています
   （`test_sdk_compat.py` は実SDKのシグネチャを `inspect` で調べるだけで、`create()` を呼びません）
 - APIキー・秘密情報は一切含みません
@@ -51,6 +55,8 @@ python tests/test_network.py       # 外部サイトへ実アクセスする
 - **検索結果の保持**（再実行・失敗・クリア時のふるまい、セッション間の独立）
 - **列構成の正規化**（旧形式の結果を既定値で補い、表示時の KeyError を防ぐ）
 - **旧 session_state の移行**（列が増えたデプロイ後も開いたままのセッションが落ちない）
+- **認証**（未ログインで検索・AI処理へ到達しない、初回パスワード変更、ログアウトで全消去、
+  失敗理由を区別しない文言、トークンを画面へ出さない、クライアントを共有・キャッシュしない）
 
 ## 補足
 

@@ -5,7 +5,8 @@ Streamlit Community Cloud にデプロイして受講生に共有する
 デプロイ手順:
 1. このフォルダを GitHub にプッシュ
 2. share.streamlit.io でリポジトリを登録
-3. Settings > Secrets に ANTHROPIC_API_KEY を設定
+3. Settings > Secrets に ANTHROPIC_API_KEY / SUPABASE_URL /
+   SUPABASE_PUBLISHABLE_KEY を設定
 """
 
 import io
@@ -31,6 +32,7 @@ from research_crowdfunding import (
     get_contact_info,
 )
 from summary_table import build_summary_html
+import auth_ui
 import result_schema as rschema
 import search_state as sstate
 
@@ -58,6 +60,12 @@ st.markdown("""
     .metric-box { background: #f6f8fa; border-radius: 8px; padding: 12px 20px; }
 </style>
 """, unsafe_allow_html=True)
+
+# ── 認証 ────────────────────────────────────────────────────────────────────────
+# ログインしていない場合はここで停止する。
+# 検索フォーム・検索結果・AI分析へは到達しない（Anthropic API も呼ばれない）
+
+auth_client = auth_ui.require_login()
 
 # ── サイドバー ──────────────────────────────────────────────────────────────────
 
