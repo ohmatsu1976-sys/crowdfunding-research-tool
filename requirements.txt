@@ -1,6 +1,12 @@
-streamlit>=1.35.0
-anthropic>=0.28.0
-requests>=2.31.0
-beautifulsoup4>=4.12.0
-pandas>=2.0.0
-cloudscraper>=1.2.71
+# 直接依存はバージョンを固定する。
+# `>=` のままだと再デプロイのたびに本番だけ最新版へ入れ替わり、
+# 手元で通ったテストが本番の動作を保証しなくなる
+# （実際に anthropic が 1.x へ上がり、messages.create から temperature が
+#  削除されて AI分析が全件失敗した）。
+# 更新するときは、クリーン環境で tests/ を全て通してから引き上げる。
+streamlit==1.62.0
+anthropic==1.2.0
+requests==2.34.2
+beautifulsoup4==4.15.0
+pandas==3.0.5
+cloudscraper==1.2.71
