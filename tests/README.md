@@ -11,6 +11,8 @@ python tests/test_result_schema.py # 検索結果の列構成の正規化・旧�
 python tests/test_auth.py          # メール＋パスワード認証（偽クライアント）
 python tests/test_app_render.py    # アプリ画面の描画（Streamlit の AppTest）
 python tests/test_sdk_compat.py    # 実 Anthropic SDK との引数互換（通信なし）
+python tests/test_product_key.py   # URL正規化・対象ドメイン検証（候補リスト用）
+python tests/test_sql_migrations.py # SQLマイグレーションの静的テスト（DB接続なし）
 python tests/test_network.py       # 外部サイトへ実アクセスする
 ```
 
@@ -27,6 +29,8 @@ python tests/test_network.py       # 外部サイトへ実アクセスする
 | `test_auth.py` | なし（決定論的） | **コードの不具合**。必ず直す |
 | `test_app_render.py` | なし（決定論的） | **コードの不具合**。必ず直す |
 | `test_sdk_compat.py` | インストール済みの Anthropic / Supabase SDK | **SDKの破壊的変更**。渡している引数を直す |
+| `test_product_key.py` | なし（決定論的） | **コードの不具合**。必ず直す |
+| `test_sql_migrations.py` | なし（決定論的・DB接続なし） | **SQLの不具合**。RLS自体が効くかはフェーズ3Eの実データテストで別途確認する |
 | `test_network.py` | 外部サイトの状態 | 掲載終了・仕様変更・IPブロックの可能性がある。コードの不具合とは限らないため、まず原因を切り分ける |
 
 `test_app_render.py` は Streamlit 同梱の `st.testing.v1.AppTest` を使う。
@@ -57,6 +61,10 @@ python tests/test_network.py       # 外部サイトへ実アクセスする
 - **旧 session_state の移行**（列が増えたデプロイ後も開いたままのセッションが落ちない）
 - **認証**（未ログインで検索・AI処理へ到達しない、初回パスワード変更、ログアウトで全消去、
   失敗理由を区別しない文言、トークンを画面へ出さない、クライアントを共有・キャッシュしない）
+- **候補リストのURL正規化**（Kickstarter/Indiegogo/ZECZEC の3ドメインのみ許可。
+  ホスト名を解析して完全一致で判定し、類似ドメイン・サブドメイン偽装を拒否する）
+- **SQLマイグレーションの静的検査**（ファイルの破損なし、権限遮断が関数作成の直後にあること、
+  秘密情報や実UUIDが含まれないこと、アプリ側とDB側のドメイン許可リストが一致すること）
 
 ## 補足
 
