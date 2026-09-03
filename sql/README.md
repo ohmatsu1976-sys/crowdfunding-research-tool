@@ -18,7 +18,12 @@ Supabase 管理画面 → SQL Editor で、**この順に、続けて**実行す
 | 4 | `migrations/0004_backfill_profiles.sql` | 既存利用者の profiles 初期登録 |
 | 5 | `migrations/0005_admin.sql.example` | 管理者の登録（**雛形**。user_id を差し替えて実行） |
 
-最後に `verify.sql` を実行し、**「ok」がすべて `true`** であることを確認する。
+最後に `verify.sql` を実行する。Supabase SQL Editor は複数の SELECT のうち
+最後の結果しか表示しないため、`verify.sql` は全検査を UNION ALL で
+**1つの結果表**にまとめてある（`check_name` / `expected` / `actual` / `ok` /
+`detail` の5列）。上から下まで `ok` 列が **すべて `true`** であることを
+確認する。表の最後には「すべてのチェックが成功」という集約行があり、
+そこだけ見ても一括で判定できる。
 
 > **0002単独の実行が完了した時点で、外部から関数を呼べない状態になる。**
 > 0002 は各関数を作成した直後、同じトランザクション内で PUBLIC / anon /
@@ -64,17 +69,38 @@ INSERT ポリシーも1つも無い。
 
 ## 確認すること（`verify.sql`）
 
-- 4テーブルの RLS が有効
-- ポリシー数（products 1 / saved_items 3 / profiles 2 / app_admins 0）と INSERT ポリシー0件
-- `anon` に4テーブルの権限が無い
-- `authenticated` に INSERT 権限が無い
-- `products` のテーブル全体 SELECT が無く、`created_by` / `created_at` を読めない
-- `saved_items` の UPDATE が `memo` / `status` / `priority_override` / `archived` の4列だけ
-- `profiles` の UPDATE が `display_name` だけ
-- 4関数すべてに `search_path` が固定され、`anon` は EXECUTE できない
-- `authenticated` が EXECUTE できるのは `is_admin` と `save_candidate` の2つだけ
-- トリガー4本・インデックス2本・一意制約2件
-- `profiles` の件数が `auth.users` と一致
+25個の検査を1行ずつ行う（結果表は上から順にこの並び）。
+
+1. 4テーブルが存在する
+2. 4テーブルすべてで RLS が有効
+3. `products` / `saved_items` / `profiles` / `app_admins` のポリシー数（1 / 3 / 2 / 0）
+4. INSERT ポリシーが0件（4テーブル合計）
+5. `anon` が4テーブルの SELECT/INSERT/UPDATE/DELETE を一切持たない
+6. `authenticated` が `products` / `saved_items` へ直接 INSERT できない
+7. `products` にテーブル全体 SELECT 権限が無い
+8. `products` の `created_by` / `created_at` を `authenticated` が取得できない
+9. `saved_items` の UPDATE 可能列が `memo` / `status` / `priority_override` / `archived` だけ
+10. `saved_items` の `user_id` / `product_id` / `saved_at` / `updated_at` を直接更新できない
+    （依頼文にある `created_at` は `saved_items` には無い列のため、監査用の `saved_at` で確認する）
+11. `profiles` の UPDATE 可能列が `display_name` だけ
+12. `app_admins` を `anon` / `authenticated` が直接操作できない
+13. `authenticated` が EXECUTE できるのは `is_admin` と `save_candidate` の2つだけ
+14. `handle_new_user` / `set_updated_at` を `authenticated` が直接実行できない
+15. `anon` が4関数のいずれも実行できない
+16. 3関数（`is_admin` / `save_candidate` / `handle_new_user`）が `SECURITY DEFINER`
+17. 4関数すべてで `search_path` が固定されている
+18. トリガー4本・インデックス2本・一意制約2件が存在する
+19. `profiles` の件数が `auth.users` と一致する
+20. `app_admins` に管理者が1名以上登録されている
+
+いずれも `has_table_privilege()` / `has_column_privilege()` /
+`has_function_privilege()` を使う。これらは指定したロール名の実際のACLを
+直接調べる関数で、SQL Editor の接続ロールが `anon`/`authenticated` の
+メンバーかどうかに左右されない（`information_schema` の
+`role_table_grants` 等はメンバーシップで見え方が変わりうるため使わない）。
+
+メールアドレス・user_id・トークンの実値は返さない。件数・真偽値・列名の
+一覧だけを返す。
 
 ## ロールバック
 

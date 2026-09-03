@@ -391,5 +391,96 @@ def test_verify_sql_checks_public_facing_functions_execute():
     assert "is_admin" in text and "save_candidate" in text
 
 
+def test_verify_sql_returns_a_single_unified_result_set():
+    """複数のSELECTではなく、UNION ALLで1つの結果表にまとめている
+
+    Supabase SQL Editor は複数の SELECT のうち最後の結果しか表示しないため、
+    個別の SELECT 文を並べる形（前回の設計）に戻さないことを保証する。
+    """
+    text = _strip_sql_comments(_read(SQL_DIR / "verify.sql"))
+    # トップレベルの文はセミコロンで区切られる。空文でない文が複数あれば
+    # 「複数の独立したSELECT結果」に戻ってしまっている。
+    statements = [s.strip() for s in text.split(";") if s.strip()]
+    assert len(statements) == 1, (
+        f"verify.sql の実行文が複数ある（{len(statements)}件）。"
+        "1つの統合結果だけを返す設計に反する"
+    )
+    assert text.lower().count("union all") >= 24, "検査がUNION ALLで統合されていない"
+
+
+def test_verify_sql_output_columns_are_check_name_expected_actual_ok():
+    """最終結果の列が check_name / expected / actual / ok / detail であること"""
+    text = _strip_sql_comments(_read(SQL_DIR / "verify.sql"))
+    # 最後の（最も外側の）select リストを確認する
+    m = re.search(
+        r"select\s+check_name\s*,\s*expected\s*,\s*actual\s*,\s*ok\s*,\s*detail\b",
+        text, re.I)
+    assert m, "最終結果の列が check_name/expected/actual/ok/detail になっていない"
+
+
+def test_verify_sql_has_summary_row():
+    """全体の合否を1行で確認できる集約行がある"""
+    text = _read(SQL_DIR / "verify.sql")
+    assert "すべてのチェックが成功" in text
+    assert "bool_and(ok)" in text
+
+
+def test_verify_sql_covers_all_25_requested_checks():
+    """依頼された25項目に対応する検査がそれぞれ含まれている"""
+    text = _read(SQL_DIR / "verify.sql")
+    required_fragments = [
+        "テーブルが4つとも存在する",
+        "RLSが有効",
+        "products のポリシー数",
+        "saved_items のポリシー数",
+        "profiles のポリシー数",
+        "app_admins のポリシー数",
+        "INSERTポリシーが0件",
+        "anon が4テーブル",
+        "authenticated が products/saved_items へ直接INSERTできない",
+        "products にテーブル全体SELECT権限がない",
+        "created_by/created_at",
+        "saved_items で更新できるのは",
+        "saved_items のuser_id/product_id/saved_at/updated_atを直接更新できない",
+        "profiles で更新できるのは",
+        "app_admins をanon/authenticatedが直接操作できない",
+        "authenticatedが実行できるのはis_admin/save_candidateだけ",
+        "handle_new_user/set_updated_atをauthenticatedが実行できない",
+        "anonが4関数のいずれも実行できない",
+        "SECURITY DEFINER",
+        "search_pathが固定",
+        "トリガーが4本",
+        "インデックスが2本",
+        "一意制約が2件",
+        "profiles件数がauth.users件数と一致する",
+        "app_adminsに管理者が1名以上登録されている",
+    ]
+    for fragment in required_fragments:
+        assert fragment in text, f"必須検査が見つからない: {fragment!r}"
+
+
+def test_verify_sql_does_not_output_secret_looking_values():
+    """検査結果に実値（メール・UUID・JWT）を出す列選択が無い
+
+    すべて count(*) や真偽値・列名の一覧だけを返し、email や user_id の
+    値そのものを select していないことを確認する。
+    """
+    text = _strip_sql_comments(_read(SQL_DIR / "verify.sql")).lower()
+    assert "select email" not in text
+    assert "select user_id" not in text
+    assert not re.search(r"select\s+[\w.]*\bemail\b", text)
+    assert not _UUID_RE.search(_read(SQL_DIR / "verify.sql"))
+    assert not _JWT_RE.search(_read(SQL_DIR / "verify.sql"))
+
+
+def test_verify_sql_uses_privilege_functions_not_role_scoped_views():
+    """role_table_grants / role_routine_grants など、接続ロールの
+    メンバーシップに見え方が左右されうるビューに依存していない"""
+    text = _strip_sql_comments(_read(SQL_DIR / "verify.sql")).lower()
+    assert "role_table_grants" not in text
+    assert "role_routine_grants" not in text
+    assert "column_privileges" not in text or "has_column_privilege" in text
+
+
 if __name__ == "__main__":
     sys.exit(run(dict(globals()), "SQLマイグレーション静的テスト"))
