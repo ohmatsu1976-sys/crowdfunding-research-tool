@@ -16,7 +16,7 @@ Streamlit にも認証にも依存しない。クライアントを引数で受�
 
 import math
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import product_key as pk
 import result_schema as rschema
@@ -399,3 +399,165 @@ def delete_saved_item(client, user_id: str, saved_item_id: str) -> bool:
         return True
     except Exception:
         return False
+
+
+# =============================================================================
+# 管理者ビュー（フェーズ3D）
+#
+# app_admins をアプリから直接読むことは一切しない（0003_rls_grants.sql で
+# 権限自体を与えていない）。管理者判定は public.is_admin() のRPCの戻り値
+# だけで行う。user_metadata・app_metadata・メールアドレスの一致では判定しない
+# （user_metadata は本人が update_user() で書き換えられるため信用できない）。
+#
+# 管理者ビューは閲覧専用。更新・削除・追加の呼び出しはこのセクションに
+# 一切書かない（tests/test_candidates.py がこのセクションを機械的に検証する）。
+#
+# saved_items と profiles には直接の外部キー関係が無いため、embedded select
+# はせず、別々に取得して user_id でアプリ側結合する。products は saved_items
+# との外部キーがあるので、フェーズ3Cと同じく埋め込みでよい。
+# =============================================================================
+
+IS_ADMIN_RPC_NAME = "is_admin"
+
+ADMIN_LIST_FAILED = "管理者データを取得できませんでした。時間をおいて、もう一度お試しください。"
+ADMIN_PAGE_SIZE = 50
+_UNKNOWN_USER_EMAIL = "（メール不明）"
+
+# saved_items 側。user_id をここで明示的に取得する（誰の行かを判別するため）。
+# select("*") は使わない。
+_ADMIN_LIST_SELECT = (
+    "id,user_id,memo,status,priority_override,archived,saved_at,"
+    "products(id,source_url,platform,name,maker,priority)"
+)
+
+# profiles は saved_items と直接の外部キー関係が無いため別クエリで取得し、
+# user_id をキーにアプリ側で結合する（無理な埋め込みSELECTはしない）。
+_ADMIN_PROFILE_SELECT = "user_id,email,display_name"
+
+
+def is_admin(client) -> bool:
+    """public.is_admin() RPCの結果だけで管理者かどうかを判定する
+
+    user_metadata・app_metadata・メールアドレスの一致では判定しない。
+    app_adminsテーブルへは触れない（このRPC以外に読む経路が無い）。
+    呼び出しに失敗した場合は安全側に倒し、管理者ではないものとして扱う。
+    """
+    try:
+        response = client.rpc(IS_ADMIN_RPC_NAME).execute()
+    except Exception:
+        return False
+    return bool(getattr(response, "data", False))
+
+
+class AdminListItem:
+    """管理者ビューの1行（saved_items ＋ products ＋ profiles の表示用項目）"""
+
+    __slots__ = ("saved_item_id", "user_id", "user_email", "user_display_name",
+                "memo", "status", "priority_override", "archived", "saved_at",
+                "name", "source_url", "platform", "maker", "priority")
+
+    def __init__(self, **fields: Any):
+        for key in self.__slots__:
+            setattr(self, key, fields.get(key))
+
+
+def list_admin_profiles(client) -> Dict[str, Dict[str, str]]:
+    """全利用者のプロフィール（表示名・メール）を取得する
+
+    profiles の RLS は「本人 or is_admin()」の行だけを返す。管理者として
+    呼べば全利用者分が返る。失敗時は空の dict を返す（呼び出し側は表示名の
+    代わりにメールで識別する前提で組み立てる）。
+    """
+    try:
+        response = client.table("profiles").select(_ADMIN_PROFILE_SELECT).execute()
+    except Exception:
+        return {}
+    rows = getattr(response, "data", None) or []
+    profiles: Dict[str, Dict[str, str]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        user_id = row.get("user_id")
+        if not user_id:
+            continue
+        profiles[user_id] = {
+            "email": row.get("email") or "",
+            "display_name": row.get("display_name") or "",
+        }
+    return profiles
+
+
+def _to_admin_list_item(row: Dict[str, Any],
+                        profiles: Dict[str, Dict[str, str]]) -> AdminListItem:
+    product = _first_product(row.get("products"))
+    user_id = row.get("user_id") or ""
+    profile = profiles.get(user_id) or {}
+    email = profile.get("email") or _UNKNOWN_USER_EMAIL
+    display_name = profile.get("display_name") or ""
+    return AdminListItem(
+        saved_item_id=row.get("id", ""),
+        user_id=user_id,
+        user_email=email,
+        user_display_name=display_name or email,
+        memo=row.get("memo") or "",
+        status=row.get("status") or DEFAULT_STATUS,
+        priority_override=row.get("priority_override") or None,
+        archived=bool(row.get("archived", False)),
+        saved_at=row.get("saved_at") or "",
+        name=product.get("name") or "（商品名不明）",
+        source_url=product.get("source_url") or "",
+        platform=product.get("platform") or "",
+        maker=product.get("maker") or "不明",
+        priority=product.get("priority") or "",
+    )
+
+
+def list_admin_saved_items(client, *, user_id: str = "", status: str = "",
+                           priority_override: str = "",
+                           include_archived: bool = False,
+                           page: int = 0,
+                           page_size: int = ADMIN_PAGE_SIZE,
+                           ) -> Tuple[Optional[List[AdminListItem]], int]:
+    """全利用者の候補を読み取り専用で取得する（管理者ビュー用）
+
+    本人（管理者自身）のuser_idでの絞り込みは行わない。RLSの
+    「user_id = 自分 OR is_admin()」により、管理者としてこの関数を呼べば
+    全利用者分が返る（一般利用者が同じ関数を呼んでも、RLSにより本人の行
+    しか返らないため、この関数自体が権限昇格の経路にはならない）。
+
+    失敗時は (None, 0) を返す。呼び出し側は None を「取得に失敗した」の
+    印として扱い、0件ヒットの (list, 0) と区別する。
+    """
+    if status and status not in STATUS_OPTIONS:
+        return None, 0
+    if priority_override and priority_override not in PRIORITY_OPTIONS:
+        return None, 0
+    page = max(0, int(page or 0))
+    page_size = max(1, min(int(page_size or ADMIN_PAGE_SIZE), ADMIN_PAGE_SIZE))
+    start = page * page_size
+    end = start + page_size - 1
+
+    try:
+        query = (client.table("saved_items")
+                 .select(_ADMIN_LIST_SELECT, count="exact")
+                 .order("saved_at", desc=True))
+        if not include_archived:
+            query = query.eq("archived", False)
+        if user_id:
+            query = query.eq("user_id", user_id)
+        if status:
+            query = query.eq("status", status)
+        if priority_override:
+            query = query.eq("priority_override", priority_override)
+        response = query.range(start, end).execute()
+    except Exception:
+        return None, 0
+
+    rows = getattr(response, "data", None) or []
+    total = getattr(response, "count", None)
+    if total is None:
+        total = len(rows)
+
+    profiles = list_admin_profiles(client)
+    items = [_to_admin_list_item(row, profiles) for row in rows if isinstance(row, dict)]
+    return items, total

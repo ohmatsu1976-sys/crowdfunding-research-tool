@@ -197,14 +197,40 @@ def test_candidates_source_never_searches_products_by_pattern():
         assert forbidden not in text, f"{forbidden} が candidates.py にある"
 
 
-def test_candidates_source_only_tables_saved_items_directly():
-    """.table() で直接触れるのは saved_items だけ（products は埋め込みでしか見ない）"""
+def test_candidates_source_only_tables_saved_items_and_profiles_directly():
+    """.table() で直接触れるのは saved_items と profiles だけ
+
+    products は saved_items との外部キーの埋め込みでしか見ない。
+    app_admins へは（このRPC以外に読む経路が無いため）一切触れない。
+    """
     import pathlib
     import re
     text = pathlib.Path(candidates.__file__).read_text(encoding="utf-8")
     tables = re.findall(r'\.table\(\s*["\']([^"\']+)["\']', text)
     assert tables, "table() 呼び出しが見つからない"
-    assert set(tables) == {"saved_items"}, set(tables)
+    assert set(tables) == {"saved_items", "profiles"}, set(tables)
+
+
+def test_candidates_source_never_tables_products_or_app_admins():
+    """products・app_admins への直接の .table() 呼び出しが無い"""
+    import pathlib
+    import re
+    text = pathlib.Path(candidates.__file__).read_text(encoding="utf-8")
+    tables = re.findall(r'\.table\(\s*["\']([^"\']+)["\']', text)
+    assert "products" not in tables
+    assert "app_admins" not in tables
+
+
+def test_candidates_source_admin_view_never_updates_or_deletes():
+    """管理者ビューのセクションに update/delete の呼び出しが無い（閲覧専用）"""
+    import pathlib
+    text = pathlib.Path(candidates.__file__).read_text(encoding="utf-8")
+    marker = "管理者ビュー（フェーズ3D）"
+    idx = text.find(marker)
+    assert idx != -1, "管理者ビューのセクションが見つからない"
+    admin_section = text[idx:]
+    for forbidden in (".update(", ".delete(", ".insert(", ".upsert("):
+        assert forbidden not in admin_section, f"{forbidden} が管理者ビューのコードにある"
 
 
 # ── 保存結果の判定 ─────────────────────────────────────────────────────────────
@@ -913,6 +939,414 @@ def test_format_saved_at_uses_only_stdlib_no_new_dependency():
     text = pathlib.Path(candidates.__file__).read_text(encoding="utf-8")
     for forbidden in ("import pytz", "import dateutil", "from dateutil"):
         assert forbidden not in text, f"{forbidden} が candidates.py にある"
+
+
+# =============================================================================
+# 管理者ビュー（フェーズ3D）
+# =============================================================================
+
+# ── 偽クライアント（saved_items・products・profiles・is_admin RPC）────────────
+
+class _FakeAdminResponse:
+    def __init__(self, data, count=None):
+        self.data = data
+        self.count = count
+
+
+class _FakeAdminQuery:
+    """select→eq→order→range→execute のチェーンを模す（saved_items用）。
+    profiles は select→execute だけを使う。"""
+
+    def __init__(self, store, table):
+        self._store = store
+        self._table = table
+        self._select_cols = None
+        self._count_mode = None
+        self._filters = {}
+        self._order = None
+        self._range = None
+
+    def select(self, columns, count=None):
+        self._select_cols = columns
+        self._count_mode = count
+        return self
+
+    def eq(self, column, value):
+        self._filters[column] = value
+        return self
+
+    def order(self, column, desc=False):
+        self._order = (column, desc)
+        return self
+
+    def range(self, start, end):
+        self._range = (start, end)
+        return self
+
+    def _matches(self, row):
+        return all(row.get(k) == v for k, v in self._filters.items())
+
+    def execute(self):
+        self._store.calls.append({
+            "table": self._table, "select": self._select_cols,
+            "count": self._count_mode, "filters": dict(self._filters),
+            "order": self._order, "range": self._range,
+        })
+        if self._store.fail:
+            raise RuntimeError("connection refused: db.example.internal:5432")
+
+        rows = self._store.tables[self._table]
+        matched = [r for r in rows if self._matches(r)]
+
+        if self._table == "profiles":
+            return _FakeAdminResponse([dict(r) for r in matched])
+
+        if self._order:
+            col, desc = self._order
+            matched = sorted(matched, key=lambda r: r.get(col, ""), reverse=desc)
+        total = len(matched)
+        if self._range:
+            start, end = self._range
+            page_rows = matched[start:end + 1]
+        else:
+            page_rows = matched
+
+        out = []
+        for row in page_rows:
+            item = dict(row)
+            product = self._store.tables["products_by_id"].get(row.get("product_id"), {})
+            item["products"] = {
+                "id": product.get("id", ""), "source_url": product.get("source_url", ""),
+                "platform": product.get("platform", ""), "name": product.get("name", ""),
+                "maker": product.get("maker", ""), "priority": product.get("priority", ""),
+            }
+            out.append(item)
+        return _FakeAdminResponse(out, count=total if self._count_mode else None)
+
+
+class _FakeAdminTable:
+    def __init__(self, store, name):
+        self._store = store
+        self._name = name
+
+    def select(self, columns, count=None):
+        return _FakeAdminQuery(self._store, self._name).select(columns, count=count)
+
+
+class _FakeAdminRpcBuilder:
+    def __init__(self, store, fn):
+        self._store = store
+        self._fn = fn
+
+    def execute(self):
+        self._store.calls.append({"rpc": self._fn})
+        if self._store.fail:
+            raise RuntimeError("connection refused: db.example.internal:5432")
+        return _FakeAdminResponse(self._store.is_admin_result)
+
+
+class _FakeAdminClient:
+    """管理者ビュー用の偽クライアント（saved_items・products・profiles・is_admin RPC）"""
+
+    def __init__(self, saved_items, products, profiles, is_admin_result=True, fail=False):
+        self.tables = {
+            "saved_items": [dict(r) for r in saved_items],
+            "products_by_id": {p["id"]: p for p in products},
+            "profiles": [dict(r) for r in profiles],
+        }
+        self.is_admin_result = is_admin_result
+        self.calls = []
+        self.fail = fail
+
+    def table(self, name):
+        return _FakeAdminTable(self, name)
+
+    def rpc(self, fn, params=None):
+        return _FakeAdminRpcBuilder(self, fn)
+
+
+def _make_admin_products():
+    return [
+        {"id": "pid-a", "source_url": "https://www.kickstarter.com/projects/x/a",
+         "platform": "Kickstarter", "name": "商品A", "maker": "メーカーA", "priority": "A"},
+        {"id": "pid-b", "source_url": "https://www.kickstarter.com/projects/x/b",
+         "platform": "Kickstarter", "name": "商品B", "maker": "メーカーB", "priority": "B"},
+        {"id": "pid-c", "source_url": "https://www.kickstarter.com/projects/x/c",
+         "platform": "Kickstarter", "name": "商品C", "maker": "メーカーC", "priority": "C"},
+    ]
+
+
+def _make_admin_saved_items():
+    return [
+        {"id": "sid-1", "user_id": "user-1", "product_id": "pid-a",
+         "memo": "学生1のメモ", "status": "候補", "priority_override": None,
+         "archived": False, "saved_at": "2026-01-01T00:00:00+00:00"},
+        {"id": "sid-2", "user_id": "user-1", "product_id": "pid-b",
+         "memo": "学生1のメモ2", "status": "交渉中", "priority_override": "A",
+         "archived": True, "saved_at": "2026-01-03T00:00:00+00:00"},
+        {"id": "sid-3", "user_id": "user-2", "product_id": "pid-c",
+         "memo": "学生2のメモ", "status": "見送り", "priority_override": "C",
+         "archived": False, "saved_at": "2026-01-02T00:00:00+00:00"},
+    ]
+
+
+def _make_admin_profiles():
+    return [
+        {"user_id": "user-1", "email": "student1@example.com", "display_name": "学生イチ"},
+        {"user_id": "user-2", "email": "student2@example.com", "display_name": ""},
+    ]
+
+
+# ── is_admin() はRPCの結果だけで判定する ──────────────────────────────────────
+
+def test_is_admin_true_from_rpc_result():
+    client = _FakeAdminClient([], [], [], is_admin_result=True)
+    assert candidates.is_admin(client) is True
+
+
+def test_is_admin_false_from_rpc_result():
+    client = _FakeAdminClient([], [], [], is_admin_result=False)
+    assert candidates.is_admin(client) is False
+
+
+def test_is_admin_false_on_exception():
+    """RPC呼び出しが失敗したら安全側に倒し、管理者ではないものとして扱う"""
+    client = _FakeAdminClient([], [], [], fail=True)
+    assert candidates.is_admin(client) is False
+
+
+def test_is_admin_uses_only_the_named_rpc():
+    """is_admin() が呼ぶのは public.is_admin RPC だけ（他のテーブルへ触れない）"""
+    client = _FakeAdminClient([], [], [], is_admin_result=True)
+    candidates.is_admin(client)
+    assert client.calls == [{"rpc": candidates.IS_ADMIN_RPC_NAME}]
+    assert candidates.IS_ADMIN_RPC_NAME == "is_admin"
+
+
+# ── list_admin_profiles() ─────────────────────────────────────────────────────
+
+def test_list_admin_profiles_returns_email_and_display_name():
+    client = _FakeAdminClient([], [], _make_admin_profiles())
+    profiles = candidates.list_admin_profiles(client)
+    assert profiles["user-1"] == {"email": "student1@example.com", "display_name": "学生イチ"}
+    assert profiles["user-2"] == {"email": "student2@example.com", "display_name": ""}
+
+
+def test_list_admin_profiles_returns_empty_dict_on_failure():
+    client = _FakeAdminClient([], [], [], fail=True)
+    assert candidates.list_admin_profiles(client) == {}
+
+
+def test_list_admin_profiles_does_not_use_select_star():
+    assert "*" not in candidates._ADMIN_PROFILE_SELECT
+
+
+# ── list_admin_saved_items() ──────────────────────────────────────────────────
+
+def _admin_client():
+    return _FakeAdminClient(_make_admin_saved_items(), _make_admin_products(),
+                            _make_admin_profiles())
+
+
+def test_list_admin_saved_items_returns_all_users_without_own_filter():
+    """管理者自身のuser_idでの絞り込みを入れず、全利用者分を返す"""
+    client = _admin_client()
+    items, total = candidates.list_admin_saved_items(client, include_archived=True)
+    assert total == 3
+    assert {i.user_id for i in items} == {"user-1", "user-2"}
+
+
+def test_list_admin_saved_items_filters_by_selected_user():
+    client = _admin_client()
+    items, total = candidates.list_admin_saved_items(
+        client, user_id="user-2", include_archived=True)
+    assert total == 1
+    assert items[0].user_id == "user-2"
+
+
+def test_list_admin_saved_items_filters_by_status():
+    client = _admin_client()
+    items, total = candidates.list_admin_saved_items(
+        client, status="交渉中", include_archived=True)
+    assert total == 1
+    assert items[0].status == "交渉中"
+
+
+def test_list_admin_saved_items_filters_by_priority_override():
+    client = _admin_client()
+    items, total = candidates.list_admin_saved_items(
+        client, priority_override="C", include_archived=True)
+    assert total == 1
+    assert items[0].priority_override == "C"
+
+
+def test_list_admin_saved_items_excludes_archived_by_default():
+    client = _admin_client()
+    items, total = candidates.list_admin_saved_items(client)
+    assert total == 2
+    assert all(not i.archived for i in items)
+
+
+def test_list_admin_saved_items_includes_archived_when_requested():
+    client = _admin_client()
+    items, total = candidates.list_admin_saved_items(client, include_archived=True)
+    assert total == 3
+    assert any(i.archived for i in items)
+
+
+def test_list_admin_saved_items_orders_by_saved_at_desc():
+    client = _admin_client()
+    items, _ = candidates.list_admin_saved_items(client, include_archived=True)
+    saved_ats = [i.saved_at for i in items]
+    assert saved_ats == sorted(saved_ats, reverse=True)
+
+
+def test_list_admin_saved_items_paginates_with_range():
+    client = _admin_client()
+    page0, total0 = candidates.list_admin_saved_items(
+        client, include_archived=True, page=0, page_size=2)
+    page1, total1 = candidates.list_admin_saved_items(
+        client, include_archived=True, page=1, page_size=2)
+    assert total0 == 3 and total1 == 3
+    assert len(page0) == 2
+    assert len(page1) == 1
+    assert {i.saved_item_id for i in page0} | {i.saved_item_id for i in page1} == \
+        {"sid-1", "sid-2", "sid-3"}
+
+
+def _last_saved_items_call(client):
+    calls = [c for c in client.calls if c.get("table") == "saved_items"]
+    assert calls, "saved_itemsへの呼び出しが記録されていない"
+    return calls[-1]
+
+
+def test_list_admin_saved_items_page_size_is_capped_at_50():
+    client = _admin_client()
+    candidates.list_admin_saved_items(client, include_archived=True, page_size=999)
+    range_call = _last_saved_items_call(client)["range"]
+    assert range_call[1] - range_call[0] + 1 == candidates.ADMIN_PAGE_SIZE
+
+
+def test_list_admin_saved_items_requests_exact_count():
+    client = _admin_client()
+    candidates.list_admin_saved_items(client, include_archived=True)
+    assert _last_saved_items_call(client)["count"] == "exact"
+
+
+def test_list_admin_saved_items_does_not_use_select_star():
+    assert "*" not in candidates._ADMIN_LIST_SELECT
+
+
+def test_list_admin_saved_items_joins_profile_by_user_id():
+    client = _admin_client()
+    items, _ = candidates.list_admin_saved_items(client, user_id="user-1",
+                                                 include_archived=True)
+    assert all(i.user_email == "student1@example.com" for i in items)
+    assert all(i.user_display_name == "学生イチ" for i in items)
+
+
+def test_list_admin_saved_items_falls_back_to_email_when_display_name_missing():
+    """表示名が未設定でも画面を落とさず、メールアドレスで識別できる"""
+    client = _admin_client()
+    items, _ = candidates.list_admin_saved_items(client, user_id="user-2",
+                                                 include_archived=True)
+    assert items[0].user_display_name == "student2@example.com"
+    assert items[0].user_email == "student2@example.com"
+
+
+def test_list_admin_saved_items_unknown_email_when_profile_missing():
+    saved_items = [{"id": "sid-x", "user_id": "user-ghost", "product_id": "pid-a",
+                   "memo": "", "status": "候補", "priority_override": None,
+                   "archived": False, "saved_at": "2026-01-01T00:00:00+00:00"}]
+    client = _FakeAdminClient(saved_items, _make_admin_products(), [])
+    items, _ = candidates.list_admin_saved_items(client, include_archived=True)
+    assert items[0].user_email == candidates._UNKNOWN_USER_EMAIL
+    assert "user-ghost" not in items[0].user_email
+
+
+def test_list_admin_saved_items_shows_required_fields():
+    client = _admin_client()
+    items, _ = candidates.list_admin_saved_items(client, user_id="user-1",
+                                                 include_archived=True)
+    item = [i for i in items if i.saved_item_id == "sid-1"][0]
+    assert item.user_display_name == "学生イチ"
+    assert item.user_email == "student1@example.com"
+    assert item.name == "商品A"
+    assert item.source_url == "https://www.kickstarter.com/projects/x/a"
+    assert item.platform == "Kickstarter"
+    assert item.maker == "メーカーA"
+    assert item.priority == "A"                # 元の判定優先度
+    assert item.priority_override is None       # 本人が設定した優先度
+    assert item.status == "候補"
+    assert item.memo == "学生1のメモ"
+    assert item.archived is False
+    assert item.saved_at == "2026-01-01T00:00:00+00:00"
+
+
+def test_list_admin_saved_items_returns_none_on_failure():
+    client = _FakeAdminClient([], [], [], fail=True)
+    items, total = candidates.list_admin_saved_items(client)
+    assert items is None
+    assert total == 0
+
+
+def test_list_admin_saved_items_rejects_invalid_status_without_calling_db():
+    client = _admin_client()
+    items, total = candidates.list_admin_saved_items(client, status="存在しない値")
+    assert items is None and total == 0
+    assert client.calls == []
+
+
+def test_list_admin_saved_items_rejects_invalid_priority_without_calling_db():
+    client = _admin_client()
+    items, total = candidates.list_admin_saved_items(client, priority_override="Z")
+    assert items is None and total == 0
+    assert client.calls == []
+
+
+def test_admin_saved_at_formats_in_jst():
+    """管理者ビューでも既存の format_saved_at_jst() をそのまま使える"""
+    client = _admin_client()
+    items, _ = candidates.list_admin_saved_items(client, user_id="user-1",
+                                                 include_archived=True)
+    item = [i for i in items if i.saved_item_id == "sid-1"][0]
+    assert candidates.format_saved_at_jst(item.saved_at) == "2026年1月1日 9:00"
+
+
+def test_admin_list_failed_message_has_no_technical_content():
+    message = candidates.ADMIN_LIST_FAILED
+    assert "token" not in message.lower()
+    assert "exception" not in message.lower()
+    assert "traceback" not in message.lower()
+    assert "sql" not in message.lower()
+
+
+def test_admin_view_state_keys_have_cand_prefix():
+    for key in (candidates_ui.ADMIN_FILTER_USER, candidates_ui.ADMIN_FILTER_STATUS,
+               candidates_ui.ADMIN_FILTER_PRIORITY, candidates_ui.ADMIN_SHOW_ARCHIVED,
+               candidates_ui.ADMIN_PAGE):
+        assert key.startswith("cand_"), key
+
+
+def test_clear_state_removes_admin_view_state_too():
+    state = {}
+    candidates_ui.init_state(state)
+    state[candidates_ui.VIEW] = candidates_ui.VIEW_ADMIN
+    state[candidates_ui.ADMIN_FILTER_USER] = "user-1"
+    state[candidates_ui.ADMIN_FILTER_STATUS] = "交渉中"
+    state[candidates_ui.ADMIN_FILTER_PRIORITY] = "A"
+    state[candidates_ui.ADMIN_SHOW_ARCHIVED] = True
+    state[candidates_ui.ADMIN_PAGE] = 3
+
+    candidates_ui.clear_state(state)
+
+    assert not any(str(k).startswith("cand_") for k in state)
+
+
+def test_view_admin_label_is_not_shown_for_the_other_two_views():
+    """画面切替の選択肢そのものの並びに管理者ビューが不用意に混ざらない"""
+    assert candidates_ui.VIEW_ADMIN not in (candidates_ui.VIEW_SEARCH, candidates_ui.VIEW_LIST)
+    assert candidates_ui.VIEW_ADMIN == "admin"
 
 
 if __name__ == "__main__":

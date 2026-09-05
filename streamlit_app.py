@@ -68,14 +68,19 @@ st.markdown("""
 
 auth_client = auth_ui.require_login()
 
-# ── 画面切替（フェーズ3C）────────────────────────────────────────────────────────
-# サイドバーの切替は常に表示する。「マイ候補リスト」を選んだ場合はここで
-# 専用画面を描画して停止し、以降の検索フォーム・AI分析・保存パネルは
-# 描画しない（既存の検索フローのコードは一切変更しない）。
+# ── 画面切替（フェーズ3C／3D）─────────────────────────────────────────────────────
+# サイドバーの切替は常に表示する（管理者ビューはis_admin()が真の利用者にだけ出る）。
+# 「マイ候補リスト」「管理者ビュー」を選んだ場合はここで専用画面を描画して停止し、
+# 以降の検索フォーム・AI分析・保存パネルは描画しない
+# （既存の検索フローのコードは一切変更しない）。
 
-candidates_ui.render_view_switch()
-if candidates_ui.get_view(st.session_state) == candidates_ui.VIEW_LIST:
+candidates_ui.render_view_switch(auth_client)
+_current_view = candidates_ui.get_view(st.session_state)
+if _current_view == candidates_ui.VIEW_LIST:
     candidates_ui.render_list_screen(auth_client)
+    st.stop()
+if _current_view == candidates_ui.VIEW_ADMIN:
+    candidates_ui.render_admin_screen(auth_client)
     st.stop()
 
 # ── サイドバー ──────────────────────────────────────────────────────────────────

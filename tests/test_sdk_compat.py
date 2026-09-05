@@ -257,5 +257,73 @@ def test_unknown_table_kwarg_is_rejected():
     raise AssertionError("未知の引数が通ってしまい、互換検査が機能していない")
 
 
+# ── 管理者ビュー（フェーズ3D）: is_admin RPC・count・range ────────────────────────
+# candidates.is_admin / list_admin_profiles / list_admin_saved_items が
+# 実際に組み立てる呼び出しが実SDKのシグネチャに束縛できることを確認する。
+# 通信はしない。
+
+def test_is_admin_rpc_call_signature_accepts_fn_only():
+    """client.rpc(fn) を引数無しで呼べる（is_admin()はパラメータを取らない）"""
+    client = _supabase_client()
+    _bind(client.rpc, "is_admin")
+
+
+def test_is_admin_rpc_builder_has_execute():
+    client = _supabase_client()
+    builder = client.rpc("is_admin")
+    assert hasattr(builder, "execute"), "rpcの戻り値にexecuteが無い"
+    _bind(builder.execute)
+
+
+def test_candidates_module_uses_the_same_is_admin_rpc_name():
+    import candidates
+    assert candidates.IS_ADMIN_RPC_NAME == "is_admin"
+
+
+def test_profiles_select_signature_accepts_columns():
+    """profiles の select が列名の文字列を受け付ける"""
+    client = _supabase_client()
+    _bind(client.table("profiles").select, "user_id,email,display_name")
+
+
+def test_saved_items_select_accepts_count_exact_kwarg():
+    """count='exact' を select に渡せる（管理者ビューの件数取得に使う）"""
+    client = _supabase_client()
+    _bind(client.table("saved_items").select,
+          "id,user_id,memo,status,priority_override,archived,saved_at,"
+          "products(id,source_url,platform,name,maker,priority)",
+          count="exact")
+
+
+def test_saved_items_select_eq_order_range_execute_signature():
+    """管理者ビューの一覧取得の組み立て方（select→eq→order→range→execute）が
+    実SDKで通る"""
+    client = _supabase_client()
+    q = client.table("saved_items").select(
+        "id,user_id,memo,status,priority_override,archived,saved_at,"
+        "products(id,source_url,platform,name,maker,priority)",
+        count="exact",
+    )
+    _bind(q.eq, "archived", False)
+    q = q.eq("archived", False)
+    _bind(q.order, "saved_at", desc=True)
+    q = q.order("saved_at", desc=True)
+    _bind(q.range, 0, 49)
+    q = q.range(0, 49)
+    assert hasattr(q, "execute")
+    _bind(q.execute)
+
+
+def test_unknown_count_value_is_rejected_by_bind_check():
+    """countに未知のキーワード名を渡すと束縛検査が失敗する（検査自体の健全性確認）"""
+    client = _supabase_client()
+    try:
+        inspect.signature(client.table("saved_items").select).bind(
+            "id", definitely_not_a_real_kwarg="exact")
+    except TypeError:
+        return
+    raise AssertionError("未知の引数が通ってしまい、互換検査が機能していない")
+
+
 if __name__ == "__main__":
     sys.exit(run(dict(globals()), "実SDK引数互換テスト（HTTP通信なし）"))

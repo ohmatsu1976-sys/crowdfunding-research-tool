@@ -79,7 +79,7 @@ def _text(at: AppTest) -> str:
     """画面に出ている文字列をまとめて返す"""
     parts = []
     for attr in ("markdown", "caption", "subheader", "title", "warning",
-                 "error", "info", "success"):
+                 "error", "info", "success", "text"):
         for el in getattr(at, attr, []):
             parts.append(str(getattr(el, "value", "")))
     return "\n".join(parts)
@@ -789,6 +789,432 @@ def test_candidate_list_view_and_widgets_clear_on_logout():
     assert not at.exception, str(at.exception)
     for key in at.session_state.filtered_state:
         assert not str(key).startswith("cand_"), f"{key} が残っている"
+
+
+# ── 管理者ビュー（フェーズ3D）───────────────────────────────────────────────────
+
+class _FakeAdminResponse:
+    def __init__(self, data, count=None):
+        self.data = data
+        self.count = count
+
+
+class _FakeAdminQuery:
+    def __init__(self, store, table):
+        self._store = store
+        self._table = table
+        self._count_mode = None
+        self._filters = {}
+        self._order = None
+        self._range = None
+
+    def select(self, columns, count=None):
+        self._count_mode = count
+        return self
+
+    def eq(self, column, value):
+        self._filters[column] = value
+        return self
+
+    def order(self, column, desc=False):
+        self._order = (column, desc)
+        return self
+
+    def range(self, start, end):
+        self._range = (start, end)
+        return self
+
+    def _matches(self, row):
+        return all(row.get(k) == v for k, v in self._filters.items())
+
+    def execute(self):
+        if self._store.get("fail_tables"):
+            raise RuntimeError("connection refused: db.example.internal:5432")
+
+        rows = self._store["tables"][self._table]
+        matched = [r for r in rows if self._matches(r)]
+
+        if self._table == "profiles":
+            return _FakeAdminResponse([dict(r) for r in matched])
+
+        if self._order:
+            col, desc = self._order
+            matched = sorted(matched, key=lambda r: r.get(col, ""), reverse=desc)
+        total = len(matched)
+        if self._range:
+            start, end = self._range
+            page_rows = matched[start:end + 1]
+        else:
+            page_rows = matched
+
+        out = []
+        for row in page_rows:
+            item = dict(row)
+            product = self._store["products"].get(row.get("product_id"), {})
+            item["products"] = {
+                "id": product.get("id", ""), "source_url": product.get("source_url", ""),
+                "platform": product.get("platform", ""), "name": product.get("name", ""),
+                "maker": product.get("maker", ""), "priority": product.get("priority", ""),
+            }
+            out.append(item)
+        return _FakeAdminResponse(out, count=total if self._count_mode else None)
+
+
+class _FakeAdminTable:
+    def __init__(self, store, name):
+        self._store = store
+        self._name = name
+
+    def select(self, columns, count=None):
+        return _FakeAdminQuery(self._store, self._name).select(columns, count=count)
+
+
+class _FakeAdminRpcBuilder:
+    def __init__(self, store, fn):
+        self._store = store
+        self._fn = fn
+
+    def execute(self):
+        if self._store.get("fail_rpc"):
+            raise RuntimeError("connection refused: db.example.internal:5432")
+        count = self._store.get("is_admin_call_count", 0) + 1
+        self._store["is_admin_call_count"] = count
+        flip_after = self._store.get("is_admin_flip_after")
+        if flip_after is not None and count > flip_after:
+            return _FakeAdminResponse(False)
+        return _FakeAdminResponse(self._store.get("is_admin", False))
+
+
+class _FakeAdminAppClient:
+    """管理者ビューのAppTest用の偽クライアント（saved_items/products/profiles/is_admin）
+
+    fail_tables: saved_items/profiles の select が例外を投げる
+    fail_rpc: is_admin RPC が例外を投げる
+    is_admin_flip_after: is_admin RPCがN回目までは is_admin の値を返し、
+        それ以降は false を返す（描画の下見とrender_admin_screenの再確認が
+        食い違う状況を再現するため）
+    """
+
+    def __init__(self, saved_items, products, profiles, is_admin=True,
+                fail_tables=False, fail_rpc=False):
+        self.auth = _FakeCandAuth()
+        self._store = {
+            "tables": {
+                "saved_items": [dict(r) for r in saved_items],
+                "profiles": [dict(r) for r in profiles],
+            },
+            "products": {p["id"]: p for p in products},
+            "is_admin": is_admin,
+            "fail_tables": fail_tables,
+            "fail_rpc": fail_rpc,
+        }
+
+    def table(self, name):
+        return _FakeAdminTable(self._store, name)
+
+    def rpc(self, fn, params=None):
+        return _FakeAdminRpcBuilder(self._store, fn)
+
+
+def _admin_fixture(extra_saved_items=None):
+    products = [
+        {"id": "pid-a", "source_url": "https://www.kickstarter.com/projects/x/a",
+         "platform": "Kickstarter", "name": "管理者確認商品A", "maker": "メーカーA", "priority": "A"},
+        {"id": "pid-b", "source_url": "https://www.kickstarter.com/projects/x/b",
+         "platform": "Kickstarter", "name": "管理者確認商品B", "maker": "メーカーB", "priority": "B"},
+    ]
+    saved_items = [
+        {"id": "sid-admin-1", "user_id": "test-user", "product_id": "pid-a",
+         "memo": "管理者自身のメモ", "status": "候補", "priority_override": None,
+         "archived": False, "saved_at": "2026-01-03T00:00:00+00:00"},
+        {"id": "sid-admin-2", "user_id": "other-user", "product_id": "pid-b",
+         "memo": "他の受講生のメモ", "status": "交渉中", "priority_override": "B",
+         "archived": False, "saved_at": "2026-01-02T00:00:00+00:00"},
+    ]
+    if extra_saved_items:
+        saved_items.extend(extra_saved_items)
+    profiles = [
+        {"user_id": "test-user", "email": "student@example.com", "display_name": "テスト利用者"},
+        {"user_id": "other-user", "email": "other@example.com", "display_name": ""},
+    ]
+    return saved_items, products, profiles
+
+
+def test_non_admin_does_not_see_admin_view_option():
+    """is_admin()が偽なら、画面切替に管理者ビューが出ない"""
+    saved_items, products, profiles = _admin_fixture()
+    fake = _FakeAdminAppClient(saved_items, products, profiles, is_admin=False)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    assert list(at.radio[0].options) == ["🔍 商品をリサーチ", "⭐ マイ候補リスト"]
+    assert "管理者ビュー" not in _text(at)
+
+
+def test_admin_sees_three_view_options():
+    """is_admin()が真なら、画面切替に管理者ビューが増える"""
+    saved_items, products, profiles = _admin_fixture()
+    fake = _FakeAdminAppClient(saved_items, products, profiles, is_admin=True)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    assert list(at.radio[0].options) == \
+        ["🔍 商品をリサーチ", "⭐ マイ候補リスト", "🛡️ 管理者ビュー"]
+
+
+def test_admin_initial_view_is_still_search():
+    """管理者であっても、ログイン直後の初期画面は商品リサーチのまま"""
+    saved_items, products, profiles = _admin_fixture()
+    fake = _FakeAdminAppClient(saved_items, products, profiles, is_admin=True)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    assert at.session_state[candidates_ui.VIEW] == candidates_ui.VIEW_SEARCH
+    assert "Step 1" in _text(at)
+
+
+def test_admin_view_shows_all_users_candidates():
+    """管理者ビューでは全利用者の候補が、他人の分も含めて表示される"""
+    saved_items, products, profiles = _admin_fixture()
+    fake = _FakeAdminAppClient(saved_items, products, profiles, is_admin=True)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        at = at.radio[0].set_value(candidates_ui.VIEW_ADMIN).run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    labels = [e.label for e in at.expander]
+    assert any("管理者確認商品A" in lbl for lbl in labels)
+    assert any("管理者確認商品B" in lbl for lbl in labels)
+    assert any("テスト利用者" in lbl for lbl in labels)
+    assert any("other@example.com" in lbl for lbl in labels), \
+        "表示名未設定の利用者がメールアドレスで識別できない"
+
+
+def test_admin_view_shows_required_fields():
+    saved_items, products, profiles = _admin_fixture()
+    fake = _FakeAdminAppClient(saved_items, products, profiles, is_admin=True)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        at = at.radio[0].set_value(candidates_ui.VIEW_ADMIN).run()
+    finally:
+        supabase_module.create_client = original
+
+    body = _text(at)
+    assert not at.exception, str(at.exception)
+    assert "student@example.com" in body
+    assert "https://www.kickstarter.com/projects/x/a" in body
+    assert "Kickstarter" in body
+    assert "メーカーA" in body
+    assert "候補" in body
+    assert "管理者自身のメモ" in body
+    assert "2026年1月3日 9:00" in body, "保存日時が日本時間で表示されていない"
+
+
+def test_admin_view_is_read_only_no_edit_or_delete_widgets():
+    """管理者ビューには更新・削除・アーカイブのボタンや編集可能な入力欄が無い"""
+    saved_items, products, profiles = _admin_fixture()
+    fake = _FakeAdminAppClient(saved_items, products, profiles, is_admin=True)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        at = at.radio[0].set_value(candidates_ui.VIEW_ADMIN).run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    button_labels = [b.label for b in at.button]
+    for forbidden in ("更新する", "削除する", "アーカイブする", "アーカイブを解除"):
+        assert forbidden not in button_labels, f"{forbidden} ボタンが管理者ビューにある"
+    assert list(at.text_area) == [], "編集可能な活動メモ欄が管理者ビューにある"
+    # 絞り込み用のselectbox(利用者・ステータス・優先度)以外に選択式の編集欄が無いこと
+    assert len(at.selectbox) == 3, "絞り込み以外のselectboxが増えている（編集欄の疑い）"
+
+
+def test_admin_view_filters_by_user():
+    saved_items, products, profiles = _admin_fixture()
+    fake = _FakeAdminAppClient(saved_items, products, profiles, is_admin=True)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        at = at.radio[0].set_value(candidates_ui.VIEW_ADMIN).run()
+        user_select = at.selectbox[0]
+        at = user_select.set_value("other-user").run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    labels = [e.label for e in at.expander]
+    assert any("管理者確認商品B" in lbl for lbl in labels)
+    assert not any("管理者確認商品A" in lbl for lbl in labels), \
+        "利用者で絞り込んでも他人の候補が出ている"
+
+
+def test_admin_view_excludes_archived_by_default_and_toggle_shows_it():
+    saved_items, products, profiles = _admin_fixture(extra_saved_items=[
+        {"id": "sid-archived", "user_id": "other-user", "product_id": "pid-a",
+         "memo": "アーカイブ済み", "status": "見送り", "priority_override": None,
+         "archived": True, "saved_at": "2026-01-04T00:00:00+00:00"},
+    ])
+    fake = _FakeAdminAppClient(saved_items, products, profiles, is_admin=True)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        at = at.radio[0].set_value(candidates_ui.VIEW_ADMIN).run()
+        assert not at.exception, str(at.exception)
+        assert "アーカイブ済み" not in _text(at)
+
+        show_archived = [c for c in at.checkbox if "アーカイブ済みも表示" in c.label][0]
+        at = show_archived.check().run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    assert "アーカイブ済み" in _text(at)
+
+
+def test_admin_view_pagination_controls_work():
+    """50件を超えたら次のページへ進める（1ページ50件のページング）"""
+    extra = [
+        {"id": f"sid-extra-{i}", "user_id": "other-user", "product_id": "pid-a",
+         "memo": f"追加{i}", "status": "候補", "priority_override": None,
+         "archived": False, "saved_at": f"2026-02-{(i % 27) + 1:02d}T00:00:00+00:00"}
+        for i in range(candidates.ADMIN_PAGE_SIZE - 1)  # 既存2件と合わせて丁度51件
+    ]
+    saved_items, products, profiles = _admin_fixture(extra_saved_items=extra)
+    assert len(saved_items) == candidates.ADMIN_PAGE_SIZE + 1
+    fake = _FakeAdminAppClient(saved_items, products, profiles, is_admin=True)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        at = at.radio[0].set_value(candidates_ui.VIEW_ADMIN).run()
+        assert not at.exception, str(at.exception)
+        assert f"{candidates.ADMIN_PAGE_SIZE + 1}件中" in _text(at)
+        assert "ページ 1 / 2" in _text(at)
+        next_btn = [b for b in at.button if "次へ" in b.label][0]
+        assert next_btn.disabled is False
+        at = next_btn.click().run()
+        assert not at.exception, str(at.exception)
+        assert "ページ 2 / 2" in _text(at)
+        next_btn2 = [b for b in at.button if "次へ" in b.label][0]
+        assert next_btn2.disabled is True, "最終ページなのに次へが押せる"
+    finally:
+        supabase_module.create_client = original
+
+
+def test_admin_view_refuses_when_second_is_admin_check_fails():
+    """サイドバーの下見でtrueでも、画面本体の再確認がfalseなら内容を表示しない
+
+    ブラウザに前回セッションのVIEW_ADMINが残っている状態を想定する
+    （サイドバーの1回目の is_admin() は真、render_admin_screen 側の
+    2回目の再確認では偽、という食い違いを偽クライアントで再現する）。
+    """
+    saved_items, products, profiles = _admin_fixture()
+    fake = _FakeAdminAppClient(saved_items, products, profiles, is_admin=True)
+    fake._store["is_admin_flip_after"] = 1
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app()
+        at.session_state[candidates_ui.VIEW] = candidates_ui.VIEW_ADMIN
+        at = at.run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    body = _text(at)
+    assert "管理者確認商品A" not in body
+    assert "管理者確認商品B" not in body
+    assert "管理者専用です" in body
+
+
+def test_admin_view_failure_shows_safe_message_only():
+    """is_admin()は真でも、一覧取得自体が失敗したら安全な文言だけを出す"""
+    saved_items, products, profiles = _admin_fixture()
+    fake = _FakeAdminAppClient(saved_items, products, profiles, is_admin=True,
+                               fail_tables=True)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        at = at.radio[0].set_value(candidates_ui.VIEW_ADMIN).run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    body = _text(at)
+    assert candidates.ADMIN_LIST_FAILED in body
+    assert "runtimeerror" not in body.lower()
+    assert "connection refused" not in body.lower()
+    assert "db.example.internal" not in body.lower()
+
+
+def test_admin_view_state_clears_on_logout():
+    saved_items, products, profiles = _admin_fixture()
+    fake = _FakeAdminAppClient(saved_items, products, profiles, is_admin=True)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        at = at.radio[0].set_value(candidates_ui.VIEW_ADMIN).run()
+        assert not at.exception, str(at.exception)
+        at.session_state[candidates_ui.ADMIN_FILTER_STATUS] = "交渉中"
+        at = at.run()
+        logout = [b for b in at.button if "ログアウト" in b.label]
+        assert logout, "ログアウトボタンが見つからない"
+        at = logout[0].click().run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    for key in at.session_state.filtered_state:
+        assert not str(key).startswith("cand_"), f"{key} が残っている"
+
+
+def test_my_list_screen_edit_features_still_work_after_admin_view_added():
+    """管理者ビュー追加後も、マイ候補リストの本人編集機能が壊れていない"""
+    saved_items, products = _list_fixture()
+    fake = _FakeListClient(saved_items, products)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        at = at.radio[0].set_value(candidates_ui.VIEW_LIST).run()
+        assert not at.exception, str(at.exception)
+        memo_box = [ta for ta in at.text_area if ta.value == "初期メモ"][0]
+        at = memo_box.set_value("管理者ビュー追加後の更新").run()
+        update_btn = [b for b in at.button if b.label == "更新する"][0]
+        at = update_btn.click().run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    assert "候補情報を更新しました" in _text(at)
+    assert fake._store["saved_items"][0]["memo"] == "管理者ビュー追加後の更新"
 
 
 if __name__ == "__main__":
