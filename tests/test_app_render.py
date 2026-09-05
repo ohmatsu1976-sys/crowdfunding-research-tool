@@ -528,5 +528,266 @@ def test_logout_clears_cand_state():
         assert not str(key).startswith("cand_"), f"{key} が残っている"
 
 
+# ── マイ候補リスト画面（フェーズ3C）───────────────────────────────────────────
+
+import candidates  # noqa: E402
+
+
+class _FakeListQuery:
+    """saved_items の select/update/delete をチェーン可能に模す（インメモリDB）"""
+
+    def __init__(self, store, kind, payload=None):
+        self._store = store
+        self._kind = kind
+        self._payload = payload
+        self._filters = {}
+        self._order = None
+        self._select_cols = None
+
+    def select(self, columns):
+        self._select_cols = columns
+        return self
+
+    def eq(self, column, value):
+        self._filters[column] = value
+        return self
+
+    def order(self, column, desc=False):
+        self._order = (column, desc)
+        return self
+
+    def _matches(self, row):
+        return all(row.get(k) == v for k, v in self._filters.items())
+
+    def execute(self):
+        rows = self._store["saved_items"]
+        matched = [r for r in rows if self._matches(r)]
+
+        if self._kind == "select":
+            if self._order:
+                col, desc = self._order
+                matched = sorted(matched, key=lambda r: r.get(col, ""), reverse=desc)
+            out = []
+            for row in matched:
+                item = dict(row)
+                item["products"] = self._store["products"].get(row["product_id"], {})
+                out.append(item)
+            return _FakeListResponse(out)
+
+        if self._kind == "update":
+            for row in matched:
+                row.update(self._payload or {})
+            return _FakeListResponse([dict(r) for r in matched])
+
+        if self._kind == "delete":
+            self._store["saved_items"] = [r for r in rows if not self._matches(r)]
+            return _FakeListResponse([dict(r) for r in matched])
+
+        raise AssertionError(f"未対応: {self._kind}")
+
+
+class _FakeListResponse:
+    def __init__(self, data):
+        self.data = data
+
+
+class _FakeListTable:
+    def __init__(self, store):
+        self._store = store
+
+    def select(self, columns):
+        return _FakeListQuery(self._store, "select").select(columns)
+
+    def update(self, payload):
+        return _FakeListQuery(self._store, "update", payload)
+
+    def delete(self):
+        return _FakeListQuery(self._store, "delete")
+
+
+class _FakeListClient:
+    def __init__(self, saved_items, products):
+        self._store = {"saved_items": [dict(r) for r in saved_items],
+                       "products": {p["id"]: p for p in products}}
+        self.auth = _FakeCandAuth()
+
+    def table(self, name):
+        assert name == "saved_items", name
+        return _FakeListTable(self._store)
+
+
+def _list_fixture():
+    products = [{"id": "pid-1", "source_url": _KS_URL, "platform": "Kickstarter",
+                "name": "一覧確認商品", "maker": "テストメーカー", "priority": "A"}]
+    saved_items = [{"id": "sid-1", "user_id": "test-user", "product_id": "pid-1",
+                   "memo": "初期メモ", "status": "候補", "priority_override": None,
+                   "archived": False, "saved_at": "2026-01-02T03:04:00",
+                   "updated_at": "2026-01-02T03:04:00"}]
+    return saved_items, products
+
+
+def test_logged_out_cannot_reach_candidate_list():
+    """未ログインでは画面切替そのものが出ず、マイ候補リストに到達できない"""
+    at = _app(logged_in=False).run()
+    assert not at.exception, str(at.exception)
+    assert list(at.radio) == []
+    assert "マイ候補リスト" not in _text(at)
+
+
+def test_default_view_after_login_is_search():
+    """ログイン直後は従来の商品リサーチ画面（マイ候補リストではない）"""
+    at = _app().run()
+    assert not at.exception, str(at.exception)
+    assert at.session_state[candidates_ui.VIEW] == candidates_ui.VIEW_SEARCH
+    assert "Step 1" in _text(at)
+
+
+def test_sidebar_switches_to_candidate_list():
+    """サイドバーの切替で「マイ候補リスト」画面へ移れる"""
+    saved_items, products = _list_fixture()
+    fake = _FakeListClient(saved_items, products)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        assert list(at.radio), "画面切替の radio が見つからない"
+        at = at.radio[0].set_value(candidates_ui.VIEW_LIST).run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    body = _text(at)
+    assert "マイ候補リスト" in body
+    assert "Step 1" not in body and "Step 2" not in body
+
+
+def test_candidate_list_view_does_not_show_search_steps():
+    """マイ候補リスト表示中は検索フォーム・AI分析画面が出ない"""
+    saved_items, products = _list_fixture()
+    fake = _FakeListClient(saved_items, products)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        at = at.radio[0].set_value(candidates_ui.VIEW_LIST).run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    assert not any("URL一覧" in ta.label for ta in at.text_area), "検索用のURL入力欄が出ている"
+
+
+def test_candidate_list_end_to_end_shows_item_and_updates():
+    """一覧表示→活動メモ更新までを、偽クライアント経由の一連の操作で確認する
+
+    supabase.create_client を差し替えるため実Supabaseへは通信しない。
+    """
+    saved_items, products = _list_fixture()
+    fake = _FakeListClient(saved_items, products)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        at = at.radio[0].set_value(candidates_ui.VIEW_LIST).run()
+        assert not at.exception, str(at.exception)
+        body = _text(at)
+        assert any("一覧確認商品" in e.label for e in at.expander), "商品名が見出しに無い"
+        assert _KS_URL in body
+        assert "テストメーカー" in body
+        assert [ta.value for ta in at.text_area] == ["初期メモ"]
+
+        memo_box = [ta for ta in at.text_area if ta.value == "初期メモ"][0]
+        at = memo_box.set_value("更新後のメモ").run()
+        update_btn = [b for b in at.button if b.label == "更新する"][0]
+        at = update_btn.click().run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    assert "候補情報を更新しました" in _text(at)
+    assert fake._store["saved_items"][0]["memo"] == "更新後のメモ"
+
+
+def test_candidate_list_archive_round_trip():
+    """アーカイブ→一覧から消える→「アーカイブ済みも表示」で再表示→解除できる"""
+    saved_items, products = _list_fixture()
+    fake = _FakeListClient(saved_items, products)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        at = at.radio[0].set_value(candidates_ui.VIEW_LIST).run()
+        archive_btn = [b for b in at.button if "アーカイブする" in b.label][0]
+        at = archive_btn.click().run()
+        assert not at.exception, str(at.exception)
+        assert "候補をアーカイブしました" in _text(at)
+        assert fake._store["saved_items"][0]["archived"] is True
+        assert not any("一覧確認商品" in e.label for e in at.expander), (
+            "アーカイブ済みが通常一覧に残っている"
+        )
+
+        show_archived = [c for c in at.checkbox if "アーカイブ済みも表示" in c.label][0]
+        at = show_archived.check().run()
+        assert any("一覧確認商品" in e.label for e in at.expander), (
+            "アーカイブ済みも表示で出てこない"
+        )
+
+        unarchive_btn = [b for b in at.button if "アーカイブを解除" in b.label][0]
+        at = unarchive_btn.click().run()
+        assert "候補を一覧に戻しました" in _text(at)
+        assert fake._store["saved_items"][0]["archived"] is False
+    finally:
+        supabase_module.create_client = original
+
+
+def test_candidate_list_delete_requires_confirmation():
+    """削除前に確認チェックが必須（1回のクリックだけで即時削除しない）"""
+    saved_items, products = _list_fixture()
+    fake = _FakeListClient(saved_items, products)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        at = at.radio[0].set_value(candidates_ui.VIEW_LIST).run()
+        delete_btn = [b for b in at.button if b.label == "削除する"][0]
+        assert delete_btn.disabled is True, "確認前なのに削除ボタンが押せる"
+
+        confirm = [c for c in at.checkbox if "を削除する" in c.label][0]
+        at = confirm.check().run()
+        delete_btn = [b for b in at.button if b.label == "削除する"][0]
+        assert delete_btn.disabled is False
+
+        at = delete_btn.click().run()
+        assert not at.exception, str(at.exception)
+        assert "候補リストから削除しました" in _text(at)
+        assert fake._store["saved_items"] == [], "saved_itemsが削除されていない"
+        assert "pid-1" in fake._store["products"], "productsの共有行まで消えている"
+    finally:
+        supabase_module.create_client = original
+
+
+def test_candidate_list_view_and_widgets_clear_on_logout():
+    """画面切替・入力中の値・削除確認状態も、ログアウトですべて消える"""
+    saved_items, products = _list_fixture()
+    fake = _FakeListClient(saved_items, products)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        at = at.radio[0].set_value(candidates_ui.VIEW_LIST).run()
+        assert not at.exception, str(at.exception)
+        at.session_state["cand_delconfirm_sid-1"] = True
+        at = at.run()
+        logout = [b for b in at.button if "ログアウト" in b.label]
+        assert logout, "ログアウトボタンが見つからない"
+        at = logout[0].click().run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    for key in at.session_state.filtered_state:
+        assert not str(key).startswith("cand_"), f"{key} が残っている"
+
+
 if __name__ == "__main__":
     sys.exit(run(dict(globals()), "アプリ描画テスト（AppTest・AI API不使用）"))

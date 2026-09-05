@@ -211,3 +211,159 @@ def summary_message(results: List[SaveResult]) -> str:
     if failed:
         parts.append(f"失敗 {failed}件")
     return "、".join(parts) + "。" if parts else ""
+
+
+# =============================================================================
+# マイ候補リスト（フェーズ3C）
+#
+# 一覧取得・更新・アーカイブ・削除。いずれも products / saved_items へ
+# select("*") を使わず、必要な列だけを明示する。like / ilike / text_search
+# による products の探索は行わない（そもそも一覧はしない。products は
+# saved_items との結合でしか触らない）。
+#
+# 更新・削除の対象は必ず id で明示したうえで、user_id でも絞り込む
+# （RLSで本人以外の行は返らない前提だが、対象を明示することで二重に守る）。
+# user_id / product_id / saved_at / updated_at はここから一切更新しない
+# （そもそも sql/migrations/0003_rls_grants.sql が権限を与えていない）。
+# =============================================================================
+
+# sql/migrations/0001_tables.sql の CHECK 制約と完全一致させる。
+# 変更する場合は両方を同時に更新すること
+# （tests/test_candidates.py が一致を検証する）。
+STATUS_OPTIONS = ("候補", "精査中", "連絡済み", "返信あり",
+                  "交渉中", "契約済み", "保留", "見送り")
+PRIORITY_OPTIONS = ("A", "B", "C")
+DEFAULT_STATUS = "候補"
+
+# saved_items と、表示に使うぶんだけの products 列。select("*") は使わない。
+_LIST_SELECT = (
+    "id,product_id,memo,status,priority_override,archived,saved_at,updated_at,"
+    "products(id,source_url,platform,name,maker,priority)"
+)
+
+LIST_FAILED = "候補リストを取得できませんでした。時間をおいて、もう一度お試しください。"
+UPDATE_OK = "候補情報を更新しました。"
+UPDATE_FAILED = "更新できませんでした。時間をおいて、もう一度お試しください。"
+ARCHIVE_OK = "候補をアーカイブしました。"
+UNARCHIVE_OK = "候補を一覧に戻しました。"
+DELETE_OK = "候補リストから削除しました。"
+DELETE_FAILED = "削除できませんでした。時間をおいて、もう一度お試しください。"
+
+_UNSET = object()  # priority_override を「引数として渡さなかった」ことを表す印
+
+
+class ListItem:
+    """マイ候補リストの1行（saved_items 本人の分 ＋ products の表示用項目）"""
+
+    __slots__ = ("saved_item_id", "product_id", "memo", "status",
+                "priority_override", "archived", "saved_at", "updated_at",
+                "name", "source_url", "platform", "maker", "priority")
+
+    def __init__(self, **fields: Any):
+        for key in self.__slots__:
+            setattr(self, key, fields.get(key))
+
+
+def _first_product(value: Any) -> Dict[str, Any]:
+    """postgrestの埋め込み結果（dict または 1件のlist）から商品情報を取り出す"""
+    if isinstance(value, list):
+        return value[0] if value and isinstance(value[0], dict) else {}
+    return value if isinstance(value, dict) else {}
+
+
+def _to_list_item(row: Dict[str, Any]) -> ListItem:
+    product = _first_product(row.get("products"))
+    return ListItem(
+        saved_item_id=row.get("id", ""),
+        product_id=row.get("product_id", ""),
+        memo=row.get("memo") or "",
+        status=row.get("status") or DEFAULT_STATUS,
+        priority_override=row.get("priority_override") or None,
+        archived=bool(row.get("archived", False)),
+        saved_at=row.get("saved_at") or "",
+        updated_at=row.get("updated_at") or "",
+        name=product.get("name") or "（商品名不明）",
+        source_url=product.get("source_url") or "",
+        platform=product.get("platform") or "",
+        maker=product.get("maker") or "不明",
+        priority=product.get("priority") or "",
+    )
+
+
+def list_saved_items(client, user_id: str, include_archived: bool = False) -> List[ListItem]:
+    """本人の候補一覧を取得する
+
+    RLSにより他人の行は返らない前提だが、本人が管理者であっても
+    「マイ候補リスト」には自分の分だけを出すため、user_id でも明示的に絞る。
+    失敗時は空リストを返す（呼び出し側で LIST_FAILED を表示する）。
+    """
+    if not user_id:
+        return []
+    try:
+        query = (client.table("saved_items")
+                 .select(_LIST_SELECT)
+                 .eq("user_id", user_id)
+                 .order("saved_at", desc=True))
+        if not include_archived:
+            query = query.eq("archived", False)
+        response = query.execute()
+    except Exception:
+        return []
+    rows = getattr(response, "data", None) or []
+    return [_to_list_item(row) for row in rows if isinstance(row, dict)]
+
+
+def update_saved_item(client, user_id: str, saved_item_id: str, *,
+                      memo: Any = None, status: Any = None,
+                      priority_override: Any = _UNSET,
+                      archived: Any = None) -> bool:
+    """本人の候補1件を更新する
+
+    変更できるのは memo / status / priority_override / archived の4列だけ
+    （sql/migrations/0003_rls_grants.sql の GRANT UPDATE と同じ4列）。
+    user_id / product_id / saved_at / updated_at はここでは絶対に送らない。
+    status・priority_override は DB の CHECK 制約と同じ値しか受け付けない。
+    """
+    if not saved_item_id or not user_id:
+        return False
+
+    fields: Dict[str, Any] = {}
+    if memo is not None:
+        fields["memo"] = str(memo)[:5000]
+    if status is not None:
+        if status not in STATUS_OPTIONS:
+            return False
+        fields["status"] = status
+    if priority_override is not _UNSET:
+        if priority_override is not None and priority_override not in PRIORITY_OPTIONS:
+            return False
+        fields["priority_override"] = priority_override
+    if archived is not None:
+        fields["archived"] = bool(archived)
+    if not fields:
+        return True
+
+    try:
+        (client.table("saved_items")
+              .update(fields)
+              .eq("id", saved_item_id)
+              .eq("user_id", user_id)
+              .execute())
+        return True
+    except Exception:
+        return False
+
+
+def delete_saved_item(client, user_id: str, saved_item_id: str) -> bool:
+    """本人の候補1件を削除する（saved_itemsの行のみ。productsは削除しない）"""
+    if not saved_item_id or not user_id:
+        return False
+    try:
+        (client.table("saved_items")
+              .delete()
+              .eq("id", saved_item_id)
+              .eq("user_id", user_id)
+              .execute())
+        return True
+    except Exception:
+        return False

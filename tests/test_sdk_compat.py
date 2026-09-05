@@ -199,5 +199,63 @@ def test_candidates_module_uses_the_same_rpc_name():
     assert candidates.RPC_NAME == "save_candidate"
 
 
+# ── マイ候補リストのselect/update/delete（フェーズ3C）───────────────────────────
+# candidates.list_saved_items / update_saved_item / delete_saved_item が
+# 実際に組み立てる呼び出し（table().select()/.update()/.delete() → .eq() →
+# .order() → .execute()）が実SDKのシグネチャに束縛できることを確認する。
+# 通信はしない（テーブル・クライアントの実体には一切触れない）。
+
+def test_table_select_eq_order_execute_signature():
+    """一覧取得の組み立て方（select→eq→order→execute）が実SDKで通る"""
+    client = _supabase_client()
+    q = client.table("saved_items").select(
+        "id,product_id,memo,status,priority_override,archived,saved_at,updated_at,"
+        "products(id,source_url,platform,name,maker,priority)"
+    )
+    _bind(q.eq, "user_id", "u1")
+    q = q.eq("user_id", "u1")
+    _bind(q.eq, "archived", False)
+    q = q.eq("archived", False)
+    _bind(q.order, "saved_at", desc=True)
+    q = q.order("saved_at", desc=True)
+    assert hasattr(q, "execute")
+    _bind(q.execute)
+
+
+def test_table_update_eq_execute_signature():
+    """更新の組み立て方（update→eq→eq→execute）が実SDKで通る"""
+    client = _supabase_client()
+    u = client.table("saved_items").update({"memo": "x", "status": "候補"})
+    _bind(u.eq, "id", "sid-1")
+    u = u.eq("id", "sid-1")
+    _bind(u.eq, "user_id", "u1")
+    u = u.eq("user_id", "u1")
+    assert hasattr(u, "execute")
+    _bind(u.execute)
+
+
+def test_table_delete_eq_execute_signature():
+    """削除の組み立て方（delete→eq→eq→execute）が実SDKで通る"""
+    client = _supabase_client()
+    d = client.table("saved_items").delete()
+    _bind(d.eq, "id", "sid-1")
+    d = d.eq("id", "sid-1")
+    _bind(d.eq, "user_id", "u1")
+    d = d.eq("user_id", "u1")
+    assert hasattr(d, "execute")
+    _bind(d.execute)
+
+
+def test_unknown_table_kwarg_is_rejected():
+    """未知の引数を足すと bind に失敗する（検査が機能していることの確認）"""
+    client = _supabase_client()
+    q = client.table("saved_items").select("id")
+    try:
+        inspect.signature(q.eq).bind("id", "sid-1", definitely_not_a_real_arg=1)
+    except TypeError:
+        return
+    raise AssertionError("未知の引数が通ってしまい、互換検査が機能していない")
+
+
 if __name__ == "__main__":
     sys.exit(run(dict(globals()), "実SDK引数互換テスト（HTTP通信なし）"))

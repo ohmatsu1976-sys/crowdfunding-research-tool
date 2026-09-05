@@ -8,6 +8,7 @@ Supabase への通信は偽クライアントで捕捉する。外部AI APIも�
 """
 
 import math
+import re
 import sys
 from datetime import date, datetime
 
@@ -163,12 +164,47 @@ def test_client_has_no_direct_table_write_methods_used():
     assert result.ok is True
 
 
-def test_save_candidate_source_does_not_call_table():
-    """candidates.py のソースに直接書き込みの呼び出しが無い"""
+def test_candidates_source_never_inserts_or_upserts():
+    """候補の新規作成はRPC経由だけ。insert/upsertはソースのどこにも無い
+
+    saved_items の一覧・更新・削除（フェーズ3C）は .table() を使うが、
+    行の作成だけは save_candidate() のRPCに限定し続ける。
+    """
     import pathlib
     text = pathlib.Path(candidates.__file__).read_text(encoding="utf-8")
-    for forbidden in (".table(", ".from_(", ".insert(", ".upsert(", ".update("):
+    for forbidden in (".insert(", ".upsert("):
         assert forbidden not in text, f"{forbidden} が candidates.py にある"
+
+
+def test_candidates_source_never_uses_select_star():
+    """products / saved_items に select("*") を使っていない
+
+    説明コメントの中の文字列は対象外にする（コード自体に無いことを見る）。
+    """
+    import pathlib
+    text = pathlib.Path(candidates.__file__).read_text(encoding="utf-8")
+    lines = [re.sub(r"#.*$", "", line) for line in text.splitlines()]
+    code_only = "\n".join(lines)
+    assert 'select("*")' not in code_only
+    assert "select('*')" not in code_only
+
+
+def test_candidates_source_never_searches_products_by_pattern():
+    """products をLIKE/ILIKE/text_searchで探索していない"""
+    import pathlib
+    text = pathlib.Path(candidates.__file__).read_text(encoding="utf-8")
+    for forbidden in (".ilike(", ".like(", ".text_search(", ".or_("):
+        assert forbidden not in text, f"{forbidden} が candidates.py にある"
+
+
+def test_candidates_source_only_tables_saved_items_directly():
+    """.table() で直接触れるのは saved_items だけ（products は埋め込みでしか見ない）"""
+    import pathlib
+    import re
+    text = pathlib.Path(candidates.__file__).read_text(encoding="utf-8")
+    tables = re.findall(r'\.table\(\s*["\']([^"\']+)["\']', text)
+    assert tables, "table() 呼び出しが見つからない"
+    assert set(tables) == {"saved_items"}, set(tables)
 
 
 # ── 保存結果の判定 ─────────────────────────────────────────────────────────────
@@ -395,6 +431,426 @@ def test_init_state_does_not_overwrite_existing():
     state = {candidates_ui.SAVED_URLS: {_KS_URL}}
     candidates_ui.init_state(state)
     assert state[candidates_ui.SAVED_URLS] == {_KS_URL}
+
+
+# =============================================================================
+# マイ候補リスト（フェーズ3C）
+# =============================================================================
+
+# ── DB制約との一致 ─────────────────────────────────────────────────────────────
+
+def _read_check_values(constraint_name: str) -> set:
+    """0001_tables.sql の CHECK 制約から許可値の集合を取り出す（簡易パーサ）"""
+    import pathlib
+    import re
+    path = (pathlib.Path(__file__).resolve().parent.parent
+            / "sql" / "migrations" / "0001_tables.sql")
+    text = path.read_text(encoding="utf-8")
+    m = re.search(constraint_name + r"\s+check\s*\(([^;]*?)\)\s*(?:,|\))\s*\n", text, re.S)
+    assert m, f"{constraint_name} が見つからない"
+    return {v.strip().strip("'") for v in re.findall(r"'([^']*)'", m.group(1))}
+
+
+def test_status_options_match_db_check_constraint():
+    """ステータス8値がDBのCHECK制約と完全一致する"""
+    db_values = _read_check_values("saved_items_status_ok")
+    assert db_values == set(candidates.STATUS_OPTIONS), (
+        f"DB={db_values} / candidates.py={set(candidates.STATUS_OPTIONS)}"
+    )
+    assert len(candidates.STATUS_OPTIONS) == 8
+
+
+def test_priority_options_match_db_check_constraint():
+    """優先度の選択肢がDBのCHECK制約と完全一致する"""
+    db_values = _read_check_values("saved_items_priority_ok")
+    assert db_values == set(candidates.PRIORITY_OPTIONS), (
+        f"DB={db_values} / candidates.py={set(candidates.PRIORITY_OPTIONS)}"
+    )
+
+
+# ── 一覧・更新・削除用の偽クライアント（インメモリDBを模す）───────────────────
+
+class _FakeQuery:
+    """select/update/delete 共通のチェーン可能なクエリビルダを模す"""
+
+    def __init__(self, store, kind, table, payload=None):
+        self._store = store
+        self._kind = kind
+        self._table = table
+        self._payload = payload
+        self._filters = {}
+        self._order = None
+        self._select_cols = None
+
+    def select(self, columns):
+        self._select_cols = columns
+        return self
+
+    def eq(self, column, value):
+        self._filters[column] = value
+        return self
+
+    def order(self, column, desc=False):
+        self._order = (column, desc)
+        return self
+
+    def _matches(self, row):
+        return all(row.get(k) == v for k, v in self._filters.items())
+
+    def execute(self):
+        self._store.calls.append({
+            "kind": self._kind, "table": self._table,
+            "filters": dict(self._filters), "select": self._select_cols,
+            "payload": self._payload,
+        })
+        if self._store.fail:
+            raise RuntimeError("connection refused: db.example.internal:5432")
+
+        rows = self._store.tables[self._table]
+        matched = [r for r in rows if self._matches(r)]
+
+        if self._kind == "select":
+            if self._order:
+                col, desc = self._order
+                matched = sorted(matched, key=lambda r: r.get(col, ""), reverse=desc)
+            out = []
+            for row in matched:
+                item = dict(row)
+                product = self._store.tables["products_by_id"].get(row.get("product_id"), {})
+                item["products"] = {
+                    "id": product.get("id", ""),
+                    "source_url": product.get("source_url", ""),
+                    "platform": product.get("platform", ""),
+                    "name": product.get("name", ""),
+                    "maker": product.get("maker", ""),
+                    "priority": product.get("priority", ""),
+                }
+                out.append(item)
+            return _FakeExecResult(out)
+
+        if self._kind == "update":
+            assert self._filters.get("id"), "更新対象のidが指定されていない"
+            assert self._filters.get("user_id"), "更新対象のuser_idが指定されていない"
+            for forbidden in ("user_id", "product_id", "saved_at", "updated_at"):
+                assert forbidden not in (self._payload or {}), (
+                    f"{forbidden} を更新しようとしている"
+                )
+            for row in matched:
+                row.update(self._payload or {})
+            return _FakeExecResult([dict(r) for r in matched])
+
+        if self._kind == "delete":
+            assert self._filters.get("id"), "削除対象のidが指定されていない"
+            assert self._filters.get("user_id"), "削除対象のuser_idが指定されていない"
+            remaining = [r for r in rows if not self._matches(r)]
+            self._store.tables[self._table] = remaining
+            return _FakeExecResult([dict(r) for r in matched])
+
+        raise AssertionError(f"未対応の操作: {self._kind}")
+
+
+class _FakeExecResult:
+    def __init__(self, data):
+        self.data = data
+
+
+class _FakeTable:
+    def __init__(self, store, name):
+        self._store = store
+        self._name = name
+
+    def select(self, columns):
+        return _FakeQuery(self._store, "select", self._name).select(columns)
+
+    def update(self, payload):
+        return _FakeQuery(self._store, "update", self._name, payload)
+
+    def delete(self):
+        return _FakeQuery(self._store, "delete", self._name)
+
+
+class _FakeListClient:
+    """saved_items の一覧・更新・削除だけを持つ偽クライアント（RLSは模さない。
+    その代わり呼び出し側が必ず user_id を渡していることをここで検証する）"""
+
+    def __init__(self, saved_items, products, fail=False):
+        self.tables = {
+            "saved_items": [dict(r) for r in saved_items],
+            "products_by_id": {p["id"]: p for p in products},
+        }
+        self.calls = []
+        self.fail = fail
+
+    def table(self, name):
+        return _FakeTable(self, name)
+
+
+def _make_products():
+    return [
+        {"id": "pid-a", "source_url": "https://www.kickstarter.com/projects/x/a",
+         "platform": "Kickstarter", "name": "商品A", "maker": "メーカーA", "priority": "A"},
+        {"id": "pid-b", "source_url": "https://www.kickstarter.com/projects/x/b",
+         "platform": "Kickstarter", "name": "商品B", "maker": "メーカーB", "priority": "B"},
+    ]
+
+
+def _make_saved_items():
+    return [
+        {"id": "sid-a-1", "user_id": "user-1", "product_id": "pid-a",
+         "memo": "メモA", "status": "候補", "priority_override": None,
+         "archived": False, "saved_at": "2026-01-02T00:00:00", "updated_at": "2026-01-02T00:00:00"},
+        {"id": "sid-a-2", "user_id": "user-1", "product_id": "pid-b",
+         "memo": "メモB", "status": "交渉中", "priority_override": "A",
+         "archived": True, "saved_at": "2026-01-01T00:00:00", "updated_at": "2026-01-01T00:00:00"},
+        {"id": "sid-b-1", "user_id": "user-2", "product_id": "pid-a",
+         "memo": "他人のメモ", "status": "契約済み", "priority_override": None,
+         "archived": False, "saved_at": "2026-01-03T00:00:00", "updated_at": "2026-01-03T00:00:00"},
+    ]
+
+
+# ── 一覧取得 ─────────────────────────────────────────────────────────────────
+
+def test_list_returns_only_own_items():
+    """他人の候補（saved_items）が一覧に出ない"""
+    client = _FakeListClient(_make_saved_items(), _make_products())
+    items = candidates.list_saved_items(client, "user-1")
+    assert {i.saved_item_id for i in items} == {"sid-a-1"}  # archived=False の自分の分だけ
+    for i in items:
+        assert "他人" not in i.memo
+
+
+def test_list_excludes_archived_by_default():
+    """通常はアーカイブ済みを表示しない"""
+    client = _FakeListClient(_make_saved_items(), _make_products())
+    items = candidates.list_saved_items(client, "user-1", include_archived=False)
+    assert all(not i.archived for i in items)
+    assert "sid-a-2" not in {i.saved_item_id for i in items}
+
+
+def test_list_includes_archived_when_requested():
+    """「アーカイブ済みも表示」で確認できる"""
+    client = _FakeListClient(_make_saved_items(), _make_products())
+    items = candidates.list_saved_items(client, "user-1", include_archived=True)
+    assert {i.saved_item_id for i in items} == {"sid-a-1", "sid-a-2"}
+
+
+def test_list_shows_required_fields():
+    """商品名・URL・メーカー・優先度・ステータス・活動メモ・保存日時を表示できる"""
+    client = _FakeListClient(_make_saved_items(), _make_products())
+    items = candidates.list_saved_items(client, "user-1", include_archived=True)
+    by_id = {i.saved_item_id: i for i in items}
+    a = by_id["sid-a-1"]
+    assert a.name == "商品A"
+    assert a.source_url == "https://www.kickstarter.com/projects/x/a"
+    assert a.platform == "Kickstarter"
+    assert a.maker == "メーカーA"
+    assert a.priority == "A"                 # 元の判定優先度
+    assert a.priority_override is None        # 本人が設定した優先度（未設定）
+    assert a.status == "候補"
+    assert a.memo == "メモA"
+    assert a.saved_at == "2026-01-02T00:00:00"
+
+    b = by_id["sid-a-2"]
+    assert b.priority_override == "A"         # 本人が上書きした優先度
+
+
+def test_list_does_not_use_select_star_in_call():
+    """一覧取得で select("*") を使わない（実際の呼び出し引数を検査）"""
+    client = _FakeListClient(_make_saved_items(), _make_products())
+    candidates.list_saved_items(client, "user-1")
+    select_calls = [c for c in client.calls if c["kind"] == "select"]
+    assert select_calls
+    for call in select_calls:
+        assert call["select"] != "*"
+        assert "*" not in call["select"]
+
+
+def test_list_filters_by_user_id_explicitly():
+    """呼び出し側が明示的に user_id で絞り込む（RLS任せにしない）"""
+    client = _FakeListClient(_make_saved_items(), _make_products())
+    candidates.list_saved_items(client, "user-1")
+    assert client.calls[-1]["filters"].get("user_id") == "user-1"
+
+
+def test_list_returns_empty_on_missing_user_id():
+    client = _FakeListClient(_make_saved_items(), _make_products())
+    assert candidates.list_saved_items(client, "") == []
+    assert candidates.list_saved_items(client, None) == []
+
+
+def test_list_returns_empty_on_failure_without_raising():
+    client = _FakeListClient(_make_saved_items(), _make_products(), fail=True)
+    assert candidates.list_saved_items(client, "user-1") == []
+
+
+# ── 更新 ─────────────────────────────────────────────────────────────────────
+
+def test_update_memo_status_priority():
+    """活動メモ・ステータス・優先度を更新できる"""
+    client = _FakeListClient(_make_saved_items(), _make_products())
+    ok = candidates.update_saved_item(client, "user-1", "sid-a-1",
+                                      memo="新しいメモ", status="連絡済み",
+                                      priority_override="B")
+    assert ok is True
+    row = client.tables["saved_items"][0]
+    assert row["memo"] == "新しいメモ"
+    assert row["status"] == "連絡済み"
+    assert row["priority_override"] == "B"
+
+
+def test_update_can_clear_priority_override():
+    """優先度の上書きを「未設定」に戻せる（Noneを送る）"""
+    client = _FakeListClient(_make_saved_items(), _make_products())
+    ok = candidates.update_saved_item(client, "user-1", "sid-a-2", priority_override=None)
+    assert ok is True
+    row = next(r for r in client.tables["saved_items"] if r["id"] == "sid-a-2")
+    assert row["priority_override"] is None
+
+
+def test_update_rejects_invalid_status():
+    client = _FakeListClient(_make_saved_items(), _make_products())
+    ok = candidates.update_saved_item(client, "user-1", "sid-a-1", status="でたらめ")
+    assert ok is False
+    update_calls = [c for c in client.calls if c["kind"] == "update"]
+    assert not update_calls, "不正な値なのにDBへ送信している"
+
+
+def test_update_rejects_invalid_priority():
+    client = _FakeListClient(_make_saved_items(), _make_products())
+    ok = candidates.update_saved_item(client, "user-1", "sid-a-1", priority_override="Z")
+    assert ok is False
+
+
+def test_update_never_sends_user_id_or_product_id():
+    """user_id・product_id・saved_at・updated_at を更新しない"""
+    client = _FakeListClient(_make_saved_items(), _make_products())
+    candidates.update_saved_item(client, "user-1", "sid-a-1",
+                                 memo="x", status="候補", archived=True)
+    payload = client.calls[-1]["payload"]
+    for forbidden in ("user_id", "product_id", "saved_at", "updated_at"):
+        assert forbidden not in payload
+
+
+def test_update_targets_id_and_user_id_explicitly():
+    """更新対象を id と user_id の両方で明示する"""
+    client = _FakeListClient(_make_saved_items(), _make_products())
+    candidates.update_saved_item(client, "user-1", "sid-a-1", memo="x")
+    filters = client.calls[-1]["filters"]
+    assert filters == {"id": "sid-a-1", "user_id": "user-1"}
+
+
+def test_update_cannot_modify_other_users_item():
+    """他人のsaved_itemsのidを指定しても、自分のuser_idでは更新対象が無い"""
+    client = _FakeListClient(_make_saved_items(), _make_products())
+    candidates.update_saved_item(client, "user-1", "sid-b-1", memo="乗っ取り")
+    row = next(r for r in client.tables["saved_items"] if r["id"] == "sid-b-1")
+    assert row["memo"] == "他人のメモ", "他人の行が書き換えられている"
+
+
+def test_update_failure_does_not_raise():
+    client = _FakeListClient(_make_saved_items(), _make_products(), fail=True)
+    ok = candidates.update_saved_item(client, "user-1", "sid-a-1", memo="x")
+    assert ok is False
+
+
+# ── アーカイブ ────────────────────────────────────────────────────────────────
+
+def test_archive_and_unarchive():
+    client = _FakeListClient(_make_saved_items(), _make_products())
+    assert candidates.update_saved_item(client, "user-1", "sid-a-1", archived=True) is True
+    row = next(r for r in client.tables["saved_items"] if r["id"] == "sid-a-1")
+    assert row["archived"] is True
+
+    assert candidates.update_saved_item(client, "user-1", "sid-a-1", archived=False) is True
+    row = next(r for r in client.tables["saved_items"] if r["id"] == "sid-a-1")
+    assert row["archived"] is False
+
+
+# ── 削除 ─────────────────────────────────────────────────────────────────────
+
+def test_delete_removes_only_saved_item_not_product():
+    """saved_itemsだけを削除し、productsの共有商品行は削除しない"""
+    client = _FakeListClient(_make_saved_items(), _make_products())
+    ok = candidates.delete_saved_item(client, "user-1", "sid-a-1")
+    assert ok is True
+    remaining_ids = {r["id"] for r in client.tables["saved_items"]}
+    assert "sid-a-1" not in remaining_ids
+    assert "pid-a" in client.tables["products_by_id"], "productsの行まで消えている"
+
+
+def test_delete_targets_id_and_user_id_explicitly():
+    client = _FakeListClient(_make_saved_items(), _make_products())
+    candidates.delete_saved_item(client, "user-1", "sid-a-1")
+    filters = [c["filters"] for c in client.calls if c["kind"] == "delete"][0]
+    assert filters == {"id": "sid-a-1", "user_id": "user-1"}
+
+
+def test_delete_cannot_remove_other_users_item():
+    client = _FakeListClient(_make_saved_items(), _make_products())
+    candidates.delete_saved_item(client, "user-1", "sid-b-1")
+    remaining_ids = {r["id"] for r in client.tables["saved_items"]}
+    assert "sid-b-1" in remaining_ids, "他人の行が削除されてしまった"
+
+
+def test_delete_failure_does_not_raise():
+    client = _FakeListClient(_make_saved_items(), _make_products(), fail=True)
+    ok = candidates.delete_saved_item(client, "user-1", "sid-a-1")
+    assert ok is False
+
+
+def test_missing_ids_are_rejected_before_any_call():
+    client = _FakeListClient(_make_saved_items(), _make_products())
+    assert candidates.update_saved_item(client, "", "sid-a-1", memo="x") is False
+    assert candidates.update_saved_item(client, "user-1", "", memo="x") is False
+    assert candidates.delete_saved_item(client, "", "sid-a-1") is False
+    assert candidates.delete_saved_item(client, "user-1", "") is False
+    assert client.calls == [], "id/user_idが空なのにDBへ問い合わせている"
+
+
+# ── 秘密情報・メッセージの安全性 ───────────────────────────────────────────────
+
+def test_list_messages_have_no_token_or_secret():
+    for message in (candidates.LIST_FAILED, candidates.UPDATE_OK,
+                    candidates.UPDATE_FAILED, candidates.ARCHIVE_OK,
+                    candidates.UNARCHIVE_OK, candidates.DELETE_OK,
+                    candidates.DELETE_FAILED):
+        assert "token" not in message.lower()
+        assert "exception" not in message.lower()
+        assert "traceback" not in message.lower()
+
+
+def test_update_exception_text_does_not_leak():
+    client = _FakeListClient(_make_saved_items(), _make_products(), fail=True)
+    ok = candidates.update_saved_item(client, "user-1", "sid-a-1", memo="x")
+    assert ok is False  # 呼び出し側は文言のみを表示する（例外を保持しない設計）
+
+
+# ── candidates_ui の画面切替・cand_ 状態 ──────────────────────────────────────
+
+def test_view_switch_state_keys_have_cand_prefix():
+    assert candidates_ui.VIEW.startswith("cand_")
+    assert candidates_ui.SHOW_ARCHIVED.startswith("cand_")
+
+
+def test_get_view_defaults_to_search():
+    """ログイン直後（画面切替キーが未設定）は必ず商品をリサーチ"""
+    state = {}
+    assert candidates_ui.get_view(state) == candidates_ui.VIEW_SEARCH
+
+
+def test_clear_state_removes_view_and_list_widget_keys():
+    """画面切替・編集中の値・削除確認状態もログアウトで消える"""
+    state = {}
+    candidates_ui.init_state(state)
+    state[candidates_ui.VIEW] = candidates_ui.VIEW_LIST
+    state[candidates_ui.SHOW_ARCHIVED] = True
+    state["cand_memo_sid-a-1"] = "編集中の下書き"
+    state["cand_status_sid-a-1"] = "交渉中"
+    state["cand_delconfirm_sid-a-1"] = True
+
+    candidates_ui.clear_state(state)
+
+    assert not any(str(k).startswith("cand_") for k in state)
 
 
 if __name__ == "__main__":

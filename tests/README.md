@@ -70,6 +70,10 @@ python tests/test_network.py       # 外部サイトへ実アクセスする
 - **候補保存**（`save_candidate` RPCのみを使用、user_idを渡さない、products/saved_itemsへ
   直接書き込まない、already_saved判定、複数件の成功・保存済み・失敗の集計、NaN/Infinity/
   日付型を含む値の安全な正規化、失敗時に例外内容を出さない、ログアウトでcand_状態が消える）
+- **マイ候補リスト**（サイドバーの画面切替、本人の候補だけを表示、select("*")不使用、
+  活動メモ・ステータス・優先度の編集がDBのCHECK制約と一致、user_id/product_idを更新しない、
+  アーカイブ・解除、削除前の確認必須、saved_itemsのみ削除しproductsは消さない、
+  更新・削除対象をidとuser_idの両方で明示）
 
 ## 補足
 
