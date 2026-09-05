@@ -13,6 +13,7 @@ python tests/test_app_render.py    # アプリ画面の描画（Streamlit の Ap
 python tests/test_sdk_compat.py    # 実 Anthropic SDK との引数互換（通信なし）
 python tests/test_product_key.py   # URL正規化・対象ドメイン検証（候補リスト用）
 python tests/test_sql_migrations.py # SQLマイグレーションの静的テスト（DB接続なし）
+python tests/test_candidates.py    # 候補保存（save_candidate RPC・偽クライアント）
 python tests/test_network.py       # 外部サイトへ実アクセスする
 ```
 
@@ -31,6 +32,7 @@ python tests/test_network.py       # 外部サイトへ実アクセスする
 | `test_sdk_compat.py` | インストール済みの Anthropic / Supabase SDK | **SDKの破壊的変更**。渡している引数を直す |
 | `test_product_key.py` | なし（決定論的） | **コードの不具合**。必ず直す |
 | `test_sql_migrations.py` | なし（決定論的・DB接続なし） | **SQLの不具合**。RLS自体が効くかはフェーズ3Eの実データテストで別途確認する |
+| `test_candidates.py` | なし（決定論的） | **コードの不具合**。必ず直す |
 | `test_network.py` | 外部サイトの状態 | 掲載終了・仕様変更・IPブロックの可能性がある。コードの不具合とは限らないため、まず原因を切り分ける |
 
 `test_app_render.py` は Streamlit 同梱の `st.testing.v1.AppTest` を使う。
@@ -65,6 +67,9 @@ python tests/test_network.py       # 外部サイトへ実アクセスする
   ホスト名を解析して完全一致で判定し、類似ドメイン・サブドメイン偽装を拒否する）
 - **SQLマイグレーションの静的検査**（ファイルの破損なし、権限遮断が関数作成の直後にあること、
   秘密情報や実UUIDが含まれないこと、アプリ側とDB側のドメイン許可リストが一致すること）
+- **候補保存**（`save_candidate` RPCのみを使用、user_idを渡さない、products/saved_itemsへ
+  直接書き込まない、already_saved判定、複数件の成功・保存済み・失敗の集計、NaN/Infinity/
+  日付型を含む値の安全な正規化、失敗時に例外内容を出さない、ログアウトでcand_状態が消える）
 
 ## 補足
 

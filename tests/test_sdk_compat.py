@@ -172,5 +172,32 @@ def test_unknown_supabase_kwarg_is_rejected():
     raise AssertionError("未知の引数が通ってしまい、互換検査が機能していない")
 
 
+# ── save_candidate RPC（候補保存・フェーズ3B）─────────────────────────────────
+# rpc() 自体は postgrest 経由の一般的な呼び出しなので、実際にアプリが渡す
+# 引数（fn名・paramsの辞書）で bind できることと、返ってきたビルダーに
+# execute() があることを実SDKで確認する。通信はしない。
+
+def test_rpc_call_signature_accepts_fn_and_params():
+    """client.rpc(fn, params) の形でアプリが呼べる"""
+    client = _supabase_client()
+    _bind(client.rpc, "save_candidate", {"p_url_key": "x", "p_source_url": "y",
+                                        "p_product": {}})
+
+
+def test_rpc_builder_has_execute():
+    """rpc(...) の戻り値に execute() があり、引数なしで呼べる"""
+    client = _supabase_client()
+    builder = client.rpc("save_candidate", {"p_url_key": "x", "p_source_url": "y",
+                                            "p_product": {}})
+    assert hasattr(builder, "execute"), "rpcの戻り値にexecuteが無い"
+    _bind(builder.execute)
+
+
+def test_candidates_module_uses_the_same_rpc_name():
+    """candidates.py が実際に呼ぶRPC名が save_candidate である"""
+    import candidates
+    assert candidates.RPC_NAME == "save_candidate"
+
+
 if __name__ == "__main__":
     sys.exit(run(dict(globals()), "実SDK引数互換テスト（HTTP通信なし）"))

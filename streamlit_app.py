@@ -33,6 +33,7 @@ from research_crowdfunding import (
 )
 from summary_table import build_summary_html
 import auth_ui
+import candidates_ui
 import result_schema as rschema
 import search_state as sstate
 
@@ -619,6 +620,10 @@ if results:
         build_summary_html(summary_df.to_dict("records")),
         unsafe_allow_html=True,
     )
+
+    st.divider()
+    candidates_ui.render(auth_client, _rows)
+    st.divider()
 
     # 全カラム展開表示
     with st.expander("全カラムを表示"):

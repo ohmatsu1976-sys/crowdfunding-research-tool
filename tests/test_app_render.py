@@ -12,8 +12,11 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import supabase as supabase_module  # noqa: E402
+
 from _harness import run  # noqa: E402
 import auth  # noqa: E402
+import candidates_ui  # noqa: E402
 import result_schema as rschema  # noqa: E402
 import search_state as sstate  # noqa: E402
 
@@ -289,6 +292,240 @@ def test_tokens_are_not_rendered():
     """トークンを画面に出さない"""
     body = _text(_app().run())
     assert "dummy-access" not in body and "dummy-refresh" not in body
+
+
+# ── 候補保存パネル（フェーズ3B）───────────────────────────────────────────────
+
+_KS_URL = "https://www.kickstarter.com/projects/x/candidate-panel-test"
+
+
+class _FakeCandAuth:
+    """set_session だけ持つ最小限の偽auth（フェーズ2Aのfakeと同じ考え方）"""
+
+    def set_session(self, access_token, refresh_token):
+        pass
+
+
+class _FakeCandResponse:
+    def __init__(self, data):
+        self.data = data
+
+
+class _FakeCandRpcBuilder:
+    def __init__(self, calls, fn, params, already_saved=False, fail=False):
+        self._calls = calls
+        self._fn = fn
+        self._params = params
+        self._already_saved = already_saved
+        self._fail = fail
+
+    def execute(self):
+        self._calls.append((self._fn, self._params))
+        if self._fail:
+            raise RuntimeError("boom (rpc failed)")
+        return _FakeCandResponse({
+            "saved_item_id": "sid-1", "product_id": "pid-1",
+            "already_saved": self._already_saved,
+        })
+
+
+class _FakeCandClient:
+    """Supabase クライアントを模す。実SDKへは一切触れない"""
+
+    def __init__(self, already_saved=False, fail=False):
+        self.auth = _FakeCandAuth()
+        self.calls = []
+        self._already_saved = already_saved
+        self._fail = fail
+
+    def rpc(self, fn, params):
+        return _FakeCandRpcBuilder(self.calls, fn, params,
+                                   already_saved=self._already_saved, fail=self._fail)
+
+
+def _patched_create_client(fake_client):
+    """supabase.create_client を差し替える。呼び出し側で必ず finally で戻すこと"""
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake_client
+    return original
+
+
+def _element_index(at: AppTest, predicate) -> int:
+    for i, element in enumerate(at.main):
+        try:
+            if predicate(element):
+                return i
+        except Exception:
+            continue
+    return -1
+
+
+def _ks_row(name="候補パネル用商品", url=_KS_URL) -> dict:
+    row = _row(name, "A")
+    row["掲載URL"] = url
+    return row
+
+
+def test_logged_out_has_no_save_panel():
+    """未ログインでは保存パネル（チェックボックス・保存ボタン）が存在しない"""
+    at = _old_session([_ks_row()], schema=rschema.SCHEMA_VERSION)
+    at.session_state[auth.ACCESS_TOKEN] = ""
+    at.session_state[auth.USER_ID] = ""
+    at = at.run()
+    assert list(at.checkbox) == []
+    assert not any("保存" in b.label for b in at.button)
+
+
+def test_save_panel_absent_when_no_results():
+    """検索結果が無ければ保存パネルも出ない"""
+    at = _app().run()
+    assert not at.exception, str(at.exception)
+    assert list(at.checkbox) == []
+    assert "候補リストへ保存" not in _text(at)
+
+
+def test_save_panel_shows_name_and_url_per_product():
+    """商品名とURLを確認してから保存できるよう、両方を表示する"""
+    at = _seeded_app([_ks_row("SonarPen 2")], ["https://example.com"])
+    assert not at.exception, str(at.exception)
+    checkboxes = list(at.checkbox)
+    assert len(checkboxes) == 1
+    assert "SonarPen 2" in checkboxes[0].label
+    assert _KS_URL in _text(at)
+
+
+def test_save_panel_shows_one_checkbox_per_product():
+    """複数件あれば商品ごとにチェックボックスが分かれる（一括保存にしない）"""
+    rows = [_ks_row("商品A", _KS_URL + "-a"), _ks_row("商品B", _KS_URL + "-b")]
+    at = _seeded_app(rows, ["https://example.com"])
+    assert not at.exception, str(at.exception)
+    checkboxes = list(at.checkbox)
+    assert len(checkboxes) == 2
+    assert all(cb.value is False for cb in checkboxes), "既定でチェック済みになっている"
+
+
+def test_save_panel_is_between_summary_and_full_table():
+    """保存パネルがサマリー表の直下・「全カラムを表示」の直前にある"""
+    at = _seeded_app([_ks_row()], ["https://example.com"])
+    assert not at.exception, str(at.exception)
+
+    summary_idx = _element_index(
+        at, lambda el: type(el).__name__ == "Markdown"
+                       and "サマリー（主要項目）" in str(getattr(el, "value", "")))
+    panel_idx = _element_index(
+        at, lambda el: type(el).__name__ == "Markdown"
+                       and "候補リストへ保存" in str(getattr(el, "value", "")))
+    table_idx = _element_index(
+        at, lambda el: type(el).__name__ == "Expander"
+                       and str(getattr(el, "label", "")) == "全カラムを表示")
+
+    assert summary_idx != -1, "サマリー表が見つからない"
+    assert panel_idx != -1, "保存パネルが見つからない"
+    assert table_idx != -1, "全カラムを表示が見つからない"
+    assert summary_idx < panel_idx < table_idx, (summary_idx, panel_idx, table_idx)
+
+
+def test_already_saved_checkbox_is_disabled_and_labeled():
+    """保存済みの商品はチェックボックスを無効化し、その旨を表示する"""
+    at = _seeded_app([_ks_row("保存済み商品")], ["https://example.com"])
+    at.session_state[candidates_ui.SAVED_URLS] = {_KS_URL}
+    at = at.run()
+    checkboxes = list(at.checkbox)
+    assert len(checkboxes) == 1
+    assert checkboxes[0].disabled is True
+    assert "保存済み" in checkboxes[0].label
+
+
+def test_end_to_end_save_success_via_fake_client():
+    """チェック→送信の一連の操作で、実際にRPCが呼ばれ成功が表示される
+
+    supabase.create_client を偽クライアントへ差し替えるため、
+    このテストでも外部（実Supabase）へは一切通信しない。
+    """
+    fake = _FakeCandClient(already_saved=False)
+    original = _patched_create_client(fake)
+    try:
+        at = _seeded_app([_ks_row("エンドツーエンド商品")], ["https://example.com"])
+        assert not at.exception, str(at.exception)
+        at.checkbox[0].check()
+        at = at.run()
+        save_button = [b for b in at.button if "保存" in b.label][0]
+        at = save_button.click().run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    assert fake.calls, "RPCが呼ばれていない"
+    fn, params = fake.calls[0]
+    assert fn == "save_candidate"
+    assert set(params) == {"p_url_key", "p_source_url", "p_product"}
+    assert "user_id" not in params and "user_id" not in params["p_product"]
+    assert _KS_URL in at.session_state[candidates_ui.SAVED_URLS]
+    assert "マイ候補リストに保存しました" in _text(at)
+
+
+def test_end_to_end_already_saved_via_fake_client():
+    """already_saved=true のときは「すでに保存されています」と表示する"""
+    fake = _FakeCandClient(already_saved=True)
+    original = _patched_create_client(fake)
+    try:
+        at = _seeded_app([_ks_row("既存商品")], ["https://example.com"])
+        at.checkbox[0].check()
+        at = at.run()
+        save_button = [b for b in at.button if "保存" in b.label][0]
+        at = save_button.click().run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    assert "すでにマイ候補リストに保存されています" in _text(at)
+
+
+def test_end_to_end_failure_does_not_leak_exception_text():
+    """RPCが例外を投げても、例外の内容を画面へ出さない"""
+    fake = _FakeCandClient(fail=True)
+    original = _patched_create_client(fake)
+    try:
+        at = _seeded_app([_ks_row("失敗商品")], ["https://example.com"])
+        at.checkbox[0].check()
+        at = at.run()
+        save_button = [b for b in at.button if "保存" in b.label][0]
+        at = save_button.click().run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    body = _text(at)
+    assert "boom" not in body and "RuntimeError" not in body and "Traceback" not in body
+    assert "保存できませんでした" in body
+
+
+def test_submit_without_selection_shows_warning():
+    """何も選択せずに送信すると警告が出て、RPCは呼ばれない"""
+    fake = _FakeCandClient()
+    original = _patched_create_client(fake)
+    try:
+        at = _seeded_app([_ks_row("未選択商品")], ["https://example.com"])
+        save_button = [b for b in at.button if "保存" in b.label][0]
+        at = save_button.click().run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    assert not fake.calls, "何も選択していないのにRPCが呼ばれた"
+    assert "選択されていません" in _text(at)
+
+
+def test_logout_clears_cand_state():
+    """ログアウトで cand_ の状態も消える（保存済み記録の見た目上のキャッシュを含む）"""
+    at = _seeded_app([_ks_row("ログアウト確認商品")], ["https://example.com"])
+    at.session_state[candidates_ui.SAVED_URLS] = {_KS_URL}
+    at.session_state[candidates_ui.LAST_MESSAGE] = "残っていたら不具合"
+    at = at.run()
+    logout = [b for b in at.button if "ログアウト" in b.label][0]
+    at = logout.click().run()
+    for key in at.session_state.filtered_state:
+        assert not str(key).startswith("cand_"), f"{key} が残っている"
 
 
 if __name__ == "__main__":
