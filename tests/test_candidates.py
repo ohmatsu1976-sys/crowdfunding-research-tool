@@ -853,5 +853,67 @@ def test_clear_state_removes_view_and_list_widget_keys():
     assert not any(str(k).startswith("cand_") for k in state)
 
 
+# ── 保存日時のJST表示（saved_at表示のみ・DB値は変更しない）────────────────────
+
+def test_format_saved_at_converts_utc_plus_offset_to_jst():
+    """本番で確認した値が「2026年9月5日 11:27」になる（+00:00形式）"""
+    assert candidates.format_saved_at_jst("2026-09-05T02:27:01.516747+00:00") == \
+        "2026年9月5日 11:27"
+
+
+def test_format_saved_at_accepts_z_suffix():
+    """Z形式（UTC終端）にも対応する"""
+    assert candidates.format_saved_at_jst("2026-09-05T02:27:01Z") == "2026年9月5日 11:27"
+
+
+def test_format_saved_at_accepts_other_timezone_offset():
+    """UTC以外のタイムゾーン付きでも正しくJSTへ変換する"""
+    # 2026-09-05T20:00:00-05:00 は UTC 2026-09-06T01:00:00 -> JST 2026-09-06T10:00:00
+    assert candidates.format_saved_at_jst("2026-09-05T20:00:00-05:00") == \
+        "2026年9月6日 10:00"
+
+
+def test_format_saved_at_crosses_date_boundary_forward():
+    """UTC夜の時刻がJSTで翌日になる（日付をまたぐ変換）"""
+    assert candidates.format_saved_at_jst("2026-09-05T20:00:00+00:00") == \
+        "2026年9月6日 5:00"
+
+
+def test_format_saved_at_naive_string_is_treated_as_utc():
+    """タイムゾーンが無い文字列はUTCとして扱う"""
+    assert candidates.format_saved_at_jst("2026-09-05T02:27:01") == "2026年9月5日 11:27"
+
+
+def test_format_saved_at_none_returns_dash():
+    assert candidates.format_saved_at_jst(None) == "－"
+
+
+def test_format_saved_at_empty_string_returns_dash():
+    assert candidates.format_saved_at_jst("") == "－"
+
+
+def test_format_saved_at_blank_string_returns_dash():
+    assert candidates.format_saved_at_jst("   ") == "－"
+
+
+def test_format_saved_at_garbage_string_returns_dash():
+    assert candidates.format_saved_at_jst("not-a-date") == "－"
+
+
+def test_format_saved_at_non_string_returns_dash_without_raising():
+    """int・dict等が渡っても例外を出さず「－」を返す"""
+    assert candidates.format_saved_at_jst(12345) == "－"
+    assert candidates.format_saved_at_jst({"a": 1}) == "－"
+    assert candidates.format_saved_at_jst([]) == "－"
+
+
+def test_format_saved_at_uses_only_stdlib_no_new_dependency():
+    """datetime/timezone/timedelta以外の外部ライブラリを追加していない"""
+    import pathlib
+    text = pathlib.Path(candidates.__file__).read_text(encoding="utf-8")
+    for forbidden in ("import pytz", "import dateutil", "from dateutil"):
+        assert forbidden not in text, f"{forbidden} が candidates.py にある"
+
+
 if __name__ == "__main__":
     sys.exit(run(dict(globals()), "候補保存テスト（偽クライアント・通信なし）"))

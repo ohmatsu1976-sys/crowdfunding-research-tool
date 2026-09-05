@@ -15,7 +15,7 @@ Streamlit にも認証にも依存しない。クライアントを引数で受�
 """
 
 import math
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Tuple
 
 import product_key as pk
@@ -242,6 +242,38 @@ _LIST_SELECT = (
 )
 
 LIST_FAILED = "候補リストを取得できませんでした。時間をおいて、もう一度お試しください。"
+
+# 保存日時（saved_at）は表示のためだけに日本時間へ変換する。
+# DB側にはUTCのISO文字列のまま保存し続ける（ここで変換した結果を書き戻すことはない）。
+# 日本にサマータイムは無いため、標準ライブラリの固定オフセット（+9時間）だけで足りる。
+_JST = timezone(timedelta(hours=9))
+_INVALID_DATETIME_DISPLAY = "－"
+
+
+def format_saved_at_jst(value: Any) -> str:
+    """保存日時のISO文字列を日本時間の表示用文字列に変換する
+
+    例: "2026-09-05T02:27:01.516747+00:00" -> "2026年9月5日 11:27"
+    "Z"終端・"+00:00"終端・別のタイムゾーン付きのいずれにも対応する。
+    None・空文字・不正な値では例外を出さず "－" を返す（画面を落とさない）。
+    """
+    if not isinstance(value, str):
+        return _INVALID_DATETIME_DISPLAY
+    text = value.strip()
+    if not text:
+        return _INVALID_DATETIME_DISPLAY
+    if text.endswith("Z") or text.endswith("z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        local = parsed.astimezone(_JST)
+    except (ValueError, TypeError, OverflowError):
+        return _INVALID_DATETIME_DISPLAY
+    return f"{local.year}年{local.month}月{local.day}日 {local.hour}:{local.minute:02d}"
+
+
 UPDATE_OK = "候補情報を更新しました。"
 UPDATE_FAILED = "更新できませんでした。時間をおいて、もう一度お試しください。"
 ARCHIVE_OK = "候補をアーカイブしました。"

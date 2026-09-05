@@ -694,6 +694,8 @@ def test_candidate_list_end_to_end_shows_item_and_updates():
         assert any("一覧確認商品" in e.label for e in at.expander), "商品名が見出しに無い"
         assert _KS_URL in body
         assert "テストメーカー" in body
+        assert "2026年1月2日 12:04" in body, "保存日時が日本時間で表示されていない"
+        assert "2026-01-02T03:04:00" not in body, "保存日時がUTCのISO文字列のまま出ている"
         assert [ta.value for ta in at.text_area] == ["初期メモ"]
 
         memo_box = [ta for ta in at.text_area if ta.value == "初期メモ"][0]

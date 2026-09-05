@@ -184,7 +184,7 @@ def render_list_screen(client) -> None:
             st.write(f"プラットフォーム: {item.platform or '不明'}　／　"
                     f"メーカー: {item.maker}")
             st.caption(f"元の判定優先度: {item.priority or '未評価'}　／　"
-                      f"保存日時: {item.saved_at}")
+                      f"保存日時: {candidates.format_saved_at_jst(item.saved_at)}")
 
             memo = st.text_area("活動メモ", value=item.memo,
                                key=f"cand_memo_{item.saved_item_id}")
