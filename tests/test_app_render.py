@@ -1338,6 +1338,90 @@ def test_summit_end_to_end_fetch_shows_only_allowed_fields():
     assert "営業メール" not in body
 
 
+def test_summit_renders_list_fields_as_bullets_without_raw_brackets():
+    """本番で報告された不具合の再現と修正確認
+
+    analyze_with_claude() が "日本販売時の訴求ポイント"・"注意点・懸念点" を
+    listで返しても、Streamlitの生の配列表示（角括弧・0:/1:のインデックス・
+    引用符・コピーアイコン）にならず、ふつうの箇条書きとして表示される。
+    """
+    fake_project = {
+        "name": "リスト確認商品", "maker": "メーカーY", "platform": "Kickstarter",
+        "genre": "ガジェット", "description": "リスト確認用の説明文です。",
+        "url": "https://www.kickstarter.com/projects/x/list-item",
+        "_creator_websites": [],
+    }
+    originals = {
+        "fetch_project_from_url": summit_ui.fetch_project_from_url,
+        "find_official_site": summit_ui.find_official_site,
+        "find_creator_site": summit_ui.find_creator_site,
+        "get_contact_info": summit_ui.get_contact_info,
+        "analyze_with_claude": summit_ui.analyze_with_claude,
+    }
+    summit_ui.fetch_project_from_url = lambda url: dict(fake_project)
+    summit_ui.find_official_site = lambda url, maker: []
+    summit_ui.find_creator_site = lambda slug, name, maker: ""
+    summit_ui.get_contact_info = lambda site_url, brand="": {}
+    summit_ui.analyze_with_claude = lambda p, client: {
+        "japanese_market_reason": "日本市場との相性は良さそうです。",
+        "appeal_points": ["ポイントA", "ポイントB"],
+        "concerns": ["懸念A", "懸念B"],
+        "japanese_competitors": "特になし", "priority": "B",
+        "priority_reason": "", "approach_reason_en": "",
+    }
+    try:
+        at = _summit_app().run()
+        url_box = at.text_input[0]
+        at = url_box.set_value(fake_project["url"]).run()
+        button = [b for b in at.button if b.label == "商品情報を取得"][0]
+        at = button.click().run()
+    finally:
+        for name, fn in originals.items():
+            setattr(summit_ui, name, fn)
+
+    assert not at.exception, str(at.exception)
+    body = _text(at)
+    assert "ポイントA" in body and "ポイントB" in body
+    assert "懸念A" in body and "懸念B" in body
+    # Streamlitの生の配列表示になっていないこと
+    for forbidden in ("[0]", "[1]", '"0":', "'0':", "0:", "1:"):
+        assert forbidden not in body, f"{forbidden!r} が配列の生表示として出ている"
+
+
+def test_summit_shows_specific_message_when_description_missing():
+    """商品概要が取得できない場合、空欄ではなく専用の案内文を出す"""
+    fake_project = {
+        "name": "概要なし商品", "maker": "メーカーZ", "platform": "Kickstarter",
+        "genre": "", "description": "",
+        "url": "https://www.kickstarter.com/projects/x/no-description",
+        "_creator_websites": [],
+    }
+    originals = {
+        "fetch_project_from_url": summit_ui.fetch_project_from_url,
+        "find_official_site": summit_ui.find_official_site,
+        "find_creator_site": summit_ui.find_creator_site,
+        "get_contact_info": summit_ui.get_contact_info,
+    }
+    summit_ui.fetch_project_from_url = lambda url: dict(fake_project)
+    summit_ui.find_official_site = lambda url, maker: []
+    summit_ui.find_creator_site = lambda slug, name, maker: ""
+    summit_ui.get_contact_info = lambda site_url, brand="": {}
+    try:
+        at = _summit_app().run()
+        url_box = at.text_input[0]
+        at = url_box.set_value(fake_project["url"]).run()
+        button = [b for b in at.button if b.label == "商品情報を取得"][0]
+        at = button.click().run()
+    finally:
+        for name, fn in originals.items():
+            setattr(summit_ui, name, fn)
+
+    assert not at.exception, str(at.exception)
+    body = _text(at)
+    assert "商品概要を取得できませんでした。" in body
+    assert "概要なし商品" in body  # 商品名自体は表示される
+
+
 def test_summit_role_change_does_not_leak_into_other_sessions():
     """role情報はsession_state経由だけで、他のモジュール状態を汚染しない"""
     at1 = _summit_app().run()

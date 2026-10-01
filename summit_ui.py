@@ -20,7 +20,8 @@ user_metadataには一切依存しない。詳細は auth._role_from_user 参照
 手を加えない。
 """
 
-from typing import Any, Dict, Optional, Tuple
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
 
@@ -136,9 +137,71 @@ def clear_state(state) -> None:
     state.pop(ERROR_KEY, None)
 
 
-def _show_field(label: str, value: str) -> None:
+# 箇条書きの先頭記号（・ ● ▪ - * や "1. "/"1) " 形式の番号）を取り除く。
+# 番号付きは後ろに空白を必須にする（"2.5" のような小数を誤って
+# 箇条書き番号として剥がさないため）。
+_BULLET_PREFIX = re.compile(r"^(?:[・･●▪\-\*]\s*|\d+[\.\)]\s+)")
+
+
+def _strip_outer_quotes(text: str) -> str:
+    """項目の外側だけを囲む引用符を取り除く（内容自体は変更しない）"""
+    text = text.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        return text[1:-1].strip()
+    return text
+
+
+def _normalize_text_list(value: Any) -> List[str]:
+    """list・文字列・空値のいずれが来ても、表示用の文字列リストへそろえる
+
+    analyze_with_claude() が返す "日本販売時の訴求ポイント"（appeal_points）・
+    "注意点・懸念点"（concerns）はJSON配列で返ることも、箇条書き風の1つの
+    文字列（改行・「・」区切り）で返ることもあるため、ここで両方を同じ形へ
+    そろえる。list をそのまま st.write() へ渡すと、Streamlitが角括弧・
+    インデックス・引用符付きのオブジェクト表示にしてしまうため、ここで
+    必ず「ふつうの文字列のリスト」へ変換してから描画する。
+    """
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        raw_items = [str(v) for v in value if v is not None and str(v).strip() != ""]
+    else:
+        text = str(value).strip()
+        raw_items = [text] if text else []
+
+    items: List[str] = []
+    for raw in raw_items:
+        for line in raw.splitlines():
+            line = _BULLET_PREFIX.sub("", line.strip())
+            line = _strip_outer_quotes(line)
+            if line:
+                items.append(line)
+    return items
+
+
+def _show_text(label: str, value: Any, empty_message: str) -> None:
+    """文章として表示する（商品概要・日本市場との相性など）"""
     st.markdown(f"**{label}**")
-    st.write(value or "（取得できませんでした）")
+    items = _normalize_text_list(value)
+    if not items:
+        st.write(empty_message)
+        return
+    st.write(" ".join(items) if len(items) > 1 else items[0])
+
+
+def _show_bullets(label: str, value: Any, empty_message: str) -> None:
+    """箇条書きとして表示する（売れそうな理由・懸念点など）
+
+    Streamlitの生のリスト表示（角括弧・0:/1:のインデックス・引用符・
+    コピーアイコン）を出さず、ふつうの箇条書きとして描画する。
+    """
+    st.markdown(f"**{label}**")
+    items = _normalize_text_list(value)
+    if not items:
+        st.write(empty_message)
+        return
+    for item in items:
+        st.markdown(f"- {item}")
 
 
 def render(client) -> None:
@@ -177,10 +240,14 @@ def render(client) -> None:
     if row.get("掲載URL"):
         st.caption(row["掲載URL"])
 
-    _show_field("商品概要", row.get("商品の特徴", ""))
-    _show_field("日本市場との相性", row.get("日本で売れそうな理由", ""))
-    _show_field("売れそうな理由", row.get("日本販売時の訴求ポイント", ""))
-    _show_field("懸念点", row.get("注意点・懸念点", ""))
+    _show_text("商品概要", row.get("商品の特徴", ""),
+              "商品概要を取得できませんでした。")
+    _show_text("日本市場との相性", row.get("日本で売れそうな理由", ""),
+              "日本市場との相性を取得できませんでした。")
+    _show_bullets("売れそうな理由", row.get("日本販売時の訴求ポイント", ""),
+                 "売れそうな理由の情報が見つかりませんでした。")
+    _show_bullets("懸念点", row.get("注意点・懸念点", ""),
+                 "懸念点の情報が見つかりませんでした。")
 
     st.markdown("**メーカー情報**")
     st.write(

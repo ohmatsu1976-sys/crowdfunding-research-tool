@@ -188,6 +188,98 @@ def test_resolve_contact_returns_unconfirmed_when_nothing_found():
     assert contact["official_url"] == ""
 
 
+# ── 表示用の正規化（list・文字列・空値の揺れを吸収する）─────────────────────────
+#
+# analyze_with_claude() の "日本販売時の訴求ポイント"（appeal_points）・
+# "注意点・懸念点"（concerns）はJSON配列で返ることも、箇条書き風の1つの
+# 文字列で返ることもある。生のlistをst.write()へ渡すとStreamlitが角括弧・
+# 0:/1:のインデックス・引用符付きのオブジェクト表示にしてしまうため
+# （本番で報告された不具合）、_normalize_text_list() が両方を同じ
+# 「ふつうの文字列のリスト」へそろえることを確認する。
+
+def test_normalize_text_list_from_plain_string():
+    """商品概要が存在する場合（通常の1文の文字列）"""
+    assert summit_ui._normalize_text_list("ふつうの説明文です。") == ["ふつうの説明文です。"]
+
+
+def test_normalize_text_list_single_sentence_with_number_inside_is_not_split():
+    """文中の数字（箇条書き記号ではない）を箇条書きとして分割しない"""
+    assert summit_ui._normalize_text_list("普通の1文の説明です。") == ["普通の1文の説明です。"]
+
+
+def test_normalize_text_list_from_list_of_strings():
+    """箇条書きがlistの場合（Claudeがそのまま配列で返したケース）"""
+    assert summit_ui._normalize_text_list(["Fast setup", "Compact design"]) == \
+        ["Fast setup", "Compact design"]
+
+
+def test_normalize_text_list_splits_bullet_style_string():
+    """箇条書きが文字列の場合（「・」区切りの1つの文字列で返ったケース）"""
+    assert summit_ui._normalize_text_list("・Fast setup\n・Compact design") == \
+        ["Fast setup", "Compact design"]
+
+
+def test_normalize_text_list_splits_numbered_string():
+    """箇条書きが文字列の場合（番号付きの1つの文字列で返ったケース）"""
+    assert summit_ui._normalize_text_list("1. Fast setup\n2) Compact design") == \
+        ["Fast setup", "Compact design"]
+
+
+def test_normalize_text_list_strips_outer_quotes_only():
+    """各項目の外側の引用符だけを除去する"""
+    assert summit_ui._normalize_text_list(['"Fast setup"', "'Compact design'"]) == \
+        ["Fast setup", "Compact design"]
+
+
+def test_normalize_text_list_keeps_internal_quotes():
+    """項目内部の引用符は取り除かない（外側だけを対象にする）"""
+    assert summit_ui._normalize_text_list(['He said "hello" to me']) == \
+        ['He said "hello" to me']
+
+
+def test_normalize_text_list_none_and_empty_return_empty():
+    """空・Noneの場合は空リストになる（呼び出し側が案内文を出す）"""
+    assert summit_ui._normalize_text_list(None) == []
+    assert summit_ui._normalize_text_list("") == []
+    assert summit_ui._normalize_text_list("   ") == []
+    assert summit_ui._normalize_text_list([]) == []
+
+
+def test_normalize_text_list_skips_none_and_blank_items_in_list():
+    assert summit_ui._normalize_text_list(["a", None, "", "   ", "b"]) == ["a", "b"]
+
+
+def test_normalize_text_list_does_not_raise_on_non_string_items():
+    """数値など文字列以外の要素が混ざっても例外にしない"""
+    assert summit_ui._normalize_text_list([1, "a", 2.5]) == ["1", "a", "2.5"]
+
+
+# ── 再発防止：バグの温床だった生のst.write(list/value)が無いこと ─────────────
+
+def test_old_broken_show_field_helper_is_removed():
+    """バグの温床だった_show_field（list値をそのままst.write）が存在しない"""
+    assert not hasattr(summit_ui, "_show_field")
+
+
+def test_render_never_passes_raw_value_to_st_write():
+    """st.write(value)のように生の値をそのまま渡していない（配列表示事故の再発防止）"""
+    import pathlib
+    text = pathlib.Path(summit_ui.__file__).read_text(encoding="utf-8")
+    assert "st.write(value" not in text
+    assert "st.write(row.get(" not in text
+
+
+def test_summit_uses_correct_build_row_keys():
+    """summit_ui.pyが参照しているキーが、build_row()の実際のキー名と一致する"""
+    import pathlib
+    import research_crowdfunding as rc
+    for key in ("商品の特徴", "日本で売れそうな理由", "日本販売時の訴求ポイント", "注意点・懸念点"):
+        assert key in rc.CSV_FIELDS, f"{key} はbuild_row()の列ではない"
+    text = pathlib.Path(summit_ui.__file__).read_text(encoding="utf-8")
+    for key in ("商品の特徴", "日本で売れそうな理由", "日本販売時の訴求ポイント", "注意点・懸念点"):
+        assert f'"{key}"' in text, f"{key} を参照していない"
+
+
 # ── 非表示にすべき機能を参照していないこと（静的検査）────────────────────────
 
 def test_summit_module_never_builds_outreach_email():
