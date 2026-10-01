@@ -35,13 +35,28 @@ EMAIL = "auth_email"
 ACCESS_TOKEN = "auth_access_token"
 REFRESH_TOKEN = "auth_refresh_token"
 MUST_CHANGE = "auth_must_change_password"
+ROLE = "auth_role"
 
-KEYS = (USER_ID, EMAIL, ACCESS_TOKEN, REFRESH_TOKEN, MUST_CHANGE)
+KEYS = (USER_ID, EMAIL, ACCESS_TOKEN, REFRESH_TOKEN, MUST_CHANGE, ROLE)
 # 画面やログへ出してはいけない session_state のキー
 NEVER_DISPLAY = (ACCESS_TOKEN, REFRESH_TOKEN)
 
 # 初回ログインかどうかの判定にだけ使う。管理者権限の判定には使わない
 PASSWORD_CHANGED_FLAG = "password_changed"
+
+# ── 利用可能機能の区分（app_metadata.role）─────────────────────────────────────
+# どの機能を使わせるかを決める実質的な権限区分。user_metadata.role は本人が
+# client.auth.update_user() で自由に書き換えられるため絶対に参照しない
+# （_role_from_user() 参照）。app_metadata はこのアプリが持たない service_role
+# （Admin API）でしか変更できないため、本人からは書き換えられない。
+# ROLE_ADMIN はフェーズ3Dの管理者ビュー（is_admin() RPCでのみ判定）を一切
+# 有効にしない（is_admin()はapp_metadataを一切参照しない独立した判定）。
+# 未設定・不正な値は安全側（student と同じ扱い）にする。
+ROLE_ADMIN = "admin"
+ROLE_STUDENT = "student"
+ROLE_SUMMIT = "summit"
+_VALID_ROLES = (ROLE_ADMIN, ROLE_STUDENT, ROLE_SUMMIT)
+DEFAULT_ROLE = ROLE_STUDENT
 
 MIN_PASSWORD_LENGTH = 10
 
@@ -142,12 +157,46 @@ def current_email(state: MutableMapping[str, Any]) -> str:
     return str(state.get(EMAIL) or "")
 
 
+def get_role(state: MutableMapping[str, Any]) -> str:
+    """利用可能機能の区分（student/admin/summit）。未ログイン・未設定なら student
+
+    値は app_metadata.role 由来（_role_from_user参照）。本人が書き換え可能な
+    user_metadataには一切依存しない。
+    """
+    role = state.get(ROLE)
+    return role if role in _VALID_ROLES else DEFAULT_ROLE
+
+
+def is_summit(state: MutableMapping[str, Any]) -> bool:
+    return get_role(state) == ROLE_SUMMIT
+
+
 def _needs_password_change(user) -> bool:
     """user_metadata に password_changed が無ければ初回ログイン扱い"""
     metadata = getattr(user, "user_metadata", None) or {}
     if not isinstance(metadata, dict):
         return True
     return not bool(metadata.get(PASSWORD_CHANGED_FLAG))
+
+
+def _role_from_user(user) -> str:
+    """app_metadata.role を読む。無い・不正な値は student 扱いにする
+
+    【重要】user_metadata.role は絶対に参照しない。user_metadata は本人が
+    client.auth.update_user() で自由に書き換えられるため、そこから画面モード
+    を決めると、サミット利用者が自分で role を student へ書き換えて生徒専用
+    機能へ入れてしまう（実際にその経路が無いことを
+    test_summit_user_cannot_unlock_student_features_via_update_user で検証）。
+    app_metadata は Admin API（service_role）経由でしか変更できず、この
+    アプリは service_role を一切持たないため、本人からは書き換えられない。
+    ここでの role はあくまで「どの画面構成を出すか」の区分であり、
+    RLS・is_admin() RPCの判定には一切使わない。
+    """
+    metadata = getattr(user, "app_metadata", None) or {}
+    if not isinstance(metadata, dict):
+        return DEFAULT_ROLE
+    role = str(metadata.get("role", "") or "").strip().lower()
+    return role if role in _VALID_ROLES else DEFAULT_ROLE
 
 
 def _store(state: MutableMapping[str, Any], session, user) -> bool:
@@ -159,6 +208,7 @@ def _store(state: MutableMapping[str, Any], session, user) -> bool:
         return False
     state[USER_ID] = user_id
     state[EMAIL] = getattr(user, "email", "") or ""
+    state[ROLE] = _role_from_user(user)
     state[ACCESS_TOKEN] = access
     state[REFRESH_TOKEN] = refresh
     state[MUST_CHANGE] = _needs_password_change(user)

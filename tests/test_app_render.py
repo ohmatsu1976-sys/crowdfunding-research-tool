@@ -19,6 +19,7 @@ import auth  # noqa: E402
 import candidates_ui  # noqa: E402
 import result_schema as rschema  # noqa: E402
 import search_state as sstate  # noqa: E402
+import summit_ui  # noqa: E402
 
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
@@ -1215,6 +1216,175 @@ def test_my_list_screen_edit_features_still_work_after_admin_view_added():
     assert not at.exception, str(at.exception)
     assert "候補情報を更新しました" in _text(at)
     assert fake._store["saved_items"][0]["memo"] == "管理者ビュー追加後の更新"
+
+
+# ── サミット特典モード（制限版画面）──────────────────────────────────────────────
+
+def _summit_app() -> AppTest:
+    """role=summitでログイン済みのアプリを用意する"""
+    at = _app()
+    at.session_state[auth.ROLE] = auth.ROLE_SUMMIT
+    return at
+
+
+def test_summit_shows_restricted_title_and_caption():
+    at = _summit_app().run()
+    assert not at.exception, str(at.exception)
+    assert any(t.value == summit_ui.TITLE for t in at.title), "サミット版タイトルが出ていない"
+    assert summit_ui.CAPTION in _text(at)
+
+
+def test_summit_hides_screen_switch_and_research_steps():
+    """サミットユーザーには画面切替も通常のStep1〜3も一切出ない"""
+    at = _summit_app().run()
+    assert not at.exception, str(at.exception)
+    body = _text(at)
+    assert list(at.radio) == [], "画面切替（商品をリサーチ/マイ候補リスト等）が出ている"
+    assert "Step 1" not in body and "Step 2" not in body and "Step 3" not in body
+    assert "URL一覧" not in body
+
+
+def test_summit_shows_single_url_input_not_textarea():
+    at = _summit_app().run()
+    assert not at.exception, str(at.exception)
+    assert len(at.text_input) >= 1
+    assert list(at.text_area) == [], "複数行のURL一覧入力（通常版）が出ている"
+
+
+def test_summit_hides_save_panel_and_candidate_features():
+    """保存機能・マイ候補リスト・管理者ビューへの導線が一切無い"""
+    at = _summit_app().run()
+    assert not at.exception, str(at.exception)
+    body = _text(at)
+    assert "マイ候補リストへ保存" not in body
+    assert "マイ候補リスト" not in body
+    assert "管理者ビュー" not in body
+    assert not any("削除する" == b.label for b in at.button)
+
+
+def test_summit_hides_csv_and_full_table_and_mail_sections():
+    at = _summit_app().run()
+    assert not at.exception, str(at.exception)
+    body = _text(at)
+    assert "CSVダウンロード" not in body
+    assert "全カラムを表示" not in body
+    assert "営業メール" not in body
+
+
+def test_summit_still_shows_logout_button():
+    """サミットユーザーでもログアウト（基本のアカウント機能）は使える"""
+    at = _summit_app().run()
+    assert not at.exception, str(at.exception)
+    assert any("ログアウト" in b.label for b in at.button)
+
+
+def test_summit_rejects_invalid_url_with_safe_message():
+    at = _summit_app().run()
+    url_box = at.text_input[0]
+    at = url_box.set_value("not-a-valid-url").run()
+    button = [b for b in at.button if b.label == "商品情報を取得"][0]
+    at = button.click().run()
+    assert not at.exception, str(at.exception)
+    assert summit_ui.INVALID_URL in _text(at)
+
+
+def test_summit_end_to_end_fetch_shows_only_allowed_fields():
+    """取得→分析→表示までを、商品取得系の関数だけを偽物に差し替えて確認する
+
+    AI分析は Secrets に ANTHROPIC_API_KEY が無いため client=None の既定値で
+    動く（実Anthropicへは通信しない）。
+    """
+    fake_project = {
+        "name": "サミット確認商品", "maker": "サミットメーカー", "platform": "Kickstarter",
+        "genre": "ガジェット", "description": "サミット向けの説明文です。",
+        "url": "https://www.kickstarter.com/projects/x/summit-item",
+        "_creator_websites": ["https://maker.example.com"],
+    }
+    originals = {
+        "fetch_project_from_url": summit_ui.fetch_project_from_url,
+        "find_official_site": summit_ui.find_official_site,
+        "find_creator_site": summit_ui.find_creator_site,
+        "get_contact_info": summit_ui.get_contact_info,
+    }
+    summit_ui.fetch_project_from_url = lambda url: dict(fake_project)
+    summit_ui.find_official_site = lambda url, maker: (_ for _ in ()).throw(
+        AssertionError("creator_websitesがあるのに探索している"))
+    summit_ui.find_creator_site = lambda slug, name, maker: (_ for _ in ()).throw(
+        AssertionError("creator_websitesがあるのに探索している"))
+    summit_ui.get_contact_info = lambda site_url, brand="": {
+        "official_url": site_url, "email": "contact@maker.example.com",
+        "contact_form": "未確認", "facebook": "未確認", "instagram": "未確認",
+        "linkedin": "未確認",
+    }
+    try:
+        at = _summit_app().run()
+        url_box = at.text_input[0]
+        at = url_box.set_value(fake_project["url"]).run()
+        button = [b for b in at.button if b.label == "商品情報を取得"][0]
+        at = button.click().run()
+    finally:
+        for name, fn in originals.items():
+            setattr(summit_ui, name, fn)
+
+    assert not at.exception, str(at.exception)
+    body = _text(at)
+    assert "サミット確認商品" in body
+    assert "サミット向けの説明文です。" in body
+    assert "サミットメーカー" in body
+    assert "contact@maker.example.com" in body
+    # 高度分析・営業メールは出さない
+    assert "優先度" not in body
+    assert "判定の確度" not in body
+    assert "営業メール" not in body
+
+
+def test_summit_role_change_does_not_leak_into_other_sessions():
+    """role情報はsession_state経由だけで、他のモジュール状態を汚染しない"""
+    at1 = _summit_app().run()
+    assert not at1.exception, str(at1.exception)
+    at2 = _app().run()  # role未設定（従来どおりのstudent扱い）
+    assert not at2.exception, str(at2.exception)
+    assert "Step 1" in _text(at2), "別セッションがサミットモードに引きずられている"
+
+
+def test_student_research_flow_unaffected_by_summit_feature():
+    """role=student（通常の受講生）は従来どおりの画面構成のまま"""
+    at = _app()
+    at.session_state[auth.ROLE] = auth.ROLE_STUDENT
+    at = at.run()
+    assert not at.exception, str(at.exception)
+    assert "Step 1" in _text(at)
+    assert list(at.radio), "画面切替（商品をリサーチ/マイ候補リスト）が出ていない"
+    assert not any(t.value == summit_ui.TITLE for t in at.title)
+
+
+def test_admin_role_unaffected_by_summit_feature():
+    """role=admin（user_metadata上の表示）でも、通常の画面構成のまま
+
+    注: ここでのrole="admin"はフェーズ3Dのis_admin() RPCとは無関係な
+    画面モードの区分であり、これだけでは管理者ビューへの選択肢は増えない
+    （管理者ビューの表示可否は常にis_admin() RPCの結果だけで決まる）。
+    """
+    at = _app()
+    at.session_state[auth.ROLE] = auth.ROLE_ADMIN
+    at = at.run()
+    assert not at.exception, str(at.exception)
+    assert "Step 1" in _text(at)
+    assert list(at.radio[0].options) == ["🔍 商品をリサーチ", "⭐ マイ候補リスト"], (
+        "role='admin'というuser_metadataの値だけで管理者ビューが増えてはいけない"
+    )
+
+
+def test_summit_state_clears_on_logout():
+    at = _summit_app().run()
+    at.session_state[summit_ui.RESULT_KEY] = {"商品名": "残っていたら不具合"}
+    at = at.run()
+    logout = [b for b in at.button if "ログアウト" in b.label]
+    assert logout, "ログアウトボタンが見つからない"
+    at = logout[0].click().run()
+    assert not at.exception, str(at.exception)
+    assert auth.ROLE not in at.session_state.filtered_state
+    assert summit_ui.RESULT_KEY not in at.session_state.filtered_state
 
 
 if __name__ == "__main__":

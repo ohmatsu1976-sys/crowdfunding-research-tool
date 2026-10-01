@@ -14,6 +14,7 @@ python tests/test_sdk_compat.py    # 実 Anthropic SDK との引数互換（通�
 python tests/test_product_key.py   # URL正規化・対象ドメイン検証（候補リスト用）
 python tests/test_sql_migrations.py # SQLマイグレーションの静的テスト（DB接続なし）
 python tests/test_candidates.py    # 候補保存（save_candidate RPC・偽クライアント）
+python tests/test_summit.py        # サミット特典モード（制限版画面・偽関数）
 python tests/test_network.py       # 外部サイトへ実アクセスする
 ```
 
@@ -33,6 +34,7 @@ python tests/test_network.py       # 外部サイトへ実アクセスする
 | `test_product_key.py` | なし（決定論的） | **コードの不具合**。必ず直す |
 | `test_sql_migrations.py` | なし（決定論的・DB接続なし） | **SQLの不具合**。RLS自体が効くかはフェーズ3Eの実データテストで別途確認する |
 | `test_candidates.py` | なし（決定論的） | **コードの不具合**。必ず直す |
+| `test_summit.py` | なし（決定論的） | **コードの不具合**。必ず直す |
 | `test_network.py` | 外部サイトの状態 | 掲載終了・仕様変更・IPブロックの可能性がある。コードの不具合とは限らないため、まず原因を切り分ける |
 
 `test_app_render.py` は Streamlit 同梱の `st.testing.v1.AppTest` を使う。
@@ -81,6 +83,11 @@ python tests/test_network.py       # 外部サイトへ実アクセスする
   管理者自身のuser_idでは絞り込まない、利用者・ステータス・優先度・アーカイブ状態で
   絞り込み、保存日時の新しい順、1ページ50件のページング、画面切替の下見と実際の描画
   直前の再確認が食い違っても内容を表示しない、失敗時は固定文言のみ）
+- **サミット特典モード**（user_metadata.roleがsummitの利用者だけに制限版画面を表示、
+  roleが未設定・不正値はstudent扱い、roleの"admin"はis_admin() RPCとは無関係で
+  権限を一切持たない、営業メール生成・保存機能・履歴・高度分析（優先度/判定の確度/
+  調達額等）・生徒専用機能（画面切替・マイ候補リスト・管理者ビュー）を一切表示しない、
+  不正URL・取得失敗時に安全な文言のみ表示、student/adminの既存画面は無変更）
 
 ## 補足
 

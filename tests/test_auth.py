@@ -45,9 +45,22 @@ class _Obj:
         self.__dict__.update(kw)
 
 
-def _user(changed=True, uid="user-1", email="a@example.com"):
-    return _Obj(id=uid, email=email,
-                user_metadata=({"password_changed": True} if changed else {}))
+def _user(changed=True, uid="user-1", email="a@example.com", role=None,
+         user_metadata_role=None):
+    """role は app_metadata.role を設定する（実際の権限区分の取得元）。
+
+    user_metadata_role は、本人が update_user() で書き換え可能な
+    user_metadata.role を独立して設定するためだけの引数（スプーフィング
+    テスト専用。本来のロール判定には一切使われないことを確認するために使う）。
+    """
+    user_metadata = {"password_changed": True} if changed else {}
+    if user_metadata_role is not None:
+        user_metadata = dict(user_metadata)
+        user_metadata["role"] = user_metadata_role
+    app_metadata = {}
+    if role is not None:
+        app_metadata = {"role": role}
+    return _Obj(id=uid, email=email, user_metadata=user_metadata, app_metadata=app_metadata)
 
 
 class _FakeAuth:
@@ -210,6 +223,158 @@ def test_sign_in_success():
     assert state[auth.USER_ID] == "user-1"
 
 
+# ── 権限区分（app_metadata.role・サミット特典モード）───────────────────────────
+#
+# 【重要】role の取得元は app_metadata だけ。user_metadata.role は
+# client.auth.update_user() で本人が自由に書き換えられるため、画面モード
+# （実質的には利用可能機能の権限）の判定には絶対に使わない。
+# app_metadata は Admin API（service_role）経由でしか変更できず、
+# このアプリは service_role を一切持たないため本人からは書き換えられない。
+
+def test_sign_in_captures_role_from_app_metadata():
+    """app_metadata.role がそのまま権限区分として保持される"""
+    state: dict = {}
+    sstate.init_state(state)
+    client = _FakeClient(_user(role="summit"))
+    ok, _ = auth.sign_in(client, "a@example.com", "password-1234", state)
+    assert ok
+    assert auth.get_role(state) == auth.ROLE_SUMMIT
+    assert auth.is_summit(state) is True
+
+
+def test_role_defaults_to_student_when_app_metadata_has_no_role():
+    """既存利用者（app_metadata.roleが未設定）はこれまでどおり student 扱いになる"""
+    state: dict = {}
+    sstate.init_state(state)
+    client = _FakeClient(_user(role=None))
+    ok, _ = auth.sign_in(client, "a@example.com", "password-1234", state)
+    assert ok
+    assert auth.get_role(state) == auth.ROLE_STUDENT
+    assert auth.is_summit(state) is False
+
+
+def test_role_is_case_insensitive():
+    state: dict = {}
+    sstate.init_state(state)
+    client = _FakeClient(_user(role="SUMMIT"))
+    auth.sign_in(client, "a@example.com", "password-1234", state)
+    assert auth.get_role(state) == auth.ROLE_SUMMIT
+
+
+def test_unknown_app_metadata_role_value_falls_back_to_student():
+    """不正な値（取りうる3値以外）は安全側のstudent扱いにする"""
+    state: dict = {}
+    sstate.init_state(state)
+    client = _FakeClient(_user(role="super-admin"))
+    auth.sign_in(client, "a@example.com", "password-1234", state)
+    assert auth.get_role(state) == auth.ROLE_STUDENT
+
+
+def test_role_admin_value_is_not_the_is_admin_rpc():
+    """app_metadata.role=='admin' は画面モードの区分であり、
+    フェーズ3Dのis_admin() RPCとは完全に独立している（名前の一致に注意）"""
+    import candidates
+    assert not hasattr(candidates, "ROLE_ADMIN")
+    # is_admin() はRPCの戻り値だけで判定するロジックで、auth.ROLEを一切参照しない
+    import inspect
+    src = inspect.getsource(candidates.is_admin)
+    assert "auth." not in src and "ROLE" not in src
+
+
+def test_app_metadata_role_admin_alone_does_not_grant_admin_rpc_privilege():
+    """app_metadata.role=='admin' だけでは管理者ビューの実権限は得られない
+
+    管理者権限は常にcandidates.is_admin()のRPC結果だけで決まり、
+    auth.get_role()の値はそのRPC呼び出しの引数にも判定にも一切関わらない。
+    """
+    import candidates
+    import inspect
+    sig = inspect.signature(candidates.is_admin)
+    assert list(sig.parameters) == ["client"], (
+        "is_admin()がclient以外の引数（role等）を取ってはいけない"
+    )
+
+
+def test_get_role_defaults_to_student_when_logged_out():
+    assert auth.get_role({}) == auth.ROLE_STUDENT
+    assert auth.is_summit({}) is False
+
+
+def test_role_cleared_on_sign_out():
+    state = _logged_in_state()
+    state[auth.ROLE] = auth.ROLE_SUMMIT
+    client = _FakeClient(_user())
+    auth.sign_out(client, state)
+    assert auth.ROLE not in state
+    assert auth.get_role(state) == auth.ROLE_STUDENT
+
+
+# ── user_metadata.role は無視する（なりすまし防止）─────────────────────────────
+
+def test_user_metadata_role_summit_is_ignored_when_app_metadata_unset():
+    """user_metadata.role=summit・app_metadata未設定ならstudentになる"""
+    state: dict = {}
+    sstate.init_state(state)
+    client = _FakeClient(_user(role=None, user_metadata_role="summit"))
+    ok, _ = auth.sign_in(client, "a@example.com", "password-1234", state)
+    assert ok
+    assert auth.get_role(state) == auth.ROLE_STUDENT
+
+
+def test_app_metadata_role_wins_over_user_metadata_role():
+    """user_metadata.role=student・app_metadata.role=summitならsummitになる
+
+    （本人が書き換えられるuser_metadataがstudentを主張しても、
+    実権限はapp_metadataだけで決まることの確認）
+    """
+    state: dict = {}
+    sstate.init_state(state)
+    client = _FakeClient(_user(role="summit", user_metadata_role="student"))
+    ok, _ = auth.sign_in(client, "a@example.com", "password-1234", state)
+    assert ok
+    assert auth.get_role(state) == auth.ROLE_SUMMIT
+
+
+def test_summit_user_cannot_unlock_student_features_via_update_user():
+    """サミット利用者がuser_metadata.roleをstudentへ変更しても、
+    実際の権限区分（app_metadata由来）は変わらずsummitのまま
+
+    update_user()はクライアントのJWTで呼べる操作であり、Supabaseの仕様上も
+    user_metadataしか書き換えられない（app_metadataはAdmin API専用）。
+    このテストはその前提のもとで、本アプリのrole判定がなりすまし後も
+    summitのままであることを確認する。
+    """
+    state: dict = {}
+    sstate.init_state(state)
+    user = _user(role="summit")
+    client = _FakeClient(user)
+    ok, _ = auth.sign_in(client, "a@example.com", "password-1234", state)
+    assert ok
+    assert auth.get_role(state) == auth.ROLE_SUMMIT
+
+    # 本人がパスワード変更フローと同じ経路でuser_metadataを書き換える
+    # （update_user()はapp_metadataには触れない）
+    client.auth.update_user({"data": {"role": "student"}})
+    assert user.user_metadata.get("role") == "student"   # user_metadataは変わった
+    assert user.app_metadata.get("role") == "summit"      # app_metadataは不変
+
+    # 再度ロールを導出しても（例えば次のリクエストでセッション復元した場合）
+    # app_metadataだけを見るため、summitのまま
+    assert auth._role_from_user(user) == auth.ROLE_SUMMIT
+
+
+def test_role_source_never_reads_user_metadata():
+    """_role_from_user のコードが user_metadata を一切参照していない
+
+    （説明用のdocstring中の言及は対象外にする。実際にgetattrで読んでいる
+    属性名だけを見る）
+    """
+    import inspect
+    src = inspect.getsource(auth._role_from_user)
+    assert 'getattr(user, "user_metadata"' not in src
+    assert 'getattr(user, "app_metadata"' in src
+
+
 def test_sign_in_failure_leaves_no_credentials():
     """ログイン失敗時に認証情報を残さない"""
     state = _logged_in_state()
@@ -341,15 +506,20 @@ def test_normal_user_can_change_password():
     assert auth.is_authenticated(state) is False, "変更後はログアウトする"
 
 
-def test_metadata_is_not_used_for_admin_rights():
-    """user_metadata は初回変更判定にだけ使い、管理者判定には使わない"""
+def test_metadata_is_not_used_to_bypass_login_or_privilege():
+    """user_metadata は初回変更判定・画面モード(role)にだけ使う
+
+    role はフェーズ3Dのis_admin() RPCとは独立した「画面モードの区分」に
+    すぎず、RLSやis_admin()判定をuser_metadataで代用することはない
+    （test_role_admin_value_is_not_the_is_admin_rpc も参照）。
+    """
     code = _code_of("auth.py")
-    for word in ("admin", "is_staff", "権限"):
+    for word in ("is_staff", "service_role"):
         assert word not in code.lower(), f"auth.py が {word} を扱っている"
-    # user_metadata から読むキーは password_changed だけ
+    # user_metadata から読むキーは password_changed と role だけ
     assert auth.PASSWORD_CHANGED_FLAG == "password_changed"
     state = _logged_in_state(changed=True)
-    assert set(state) & {"auth_is_admin", "auth_role"} == set()
+    assert state[auth.ROLE] == auth.ROLE_STUDENT  # 既定値。権限とは無関係
 
 
 # ── セッション復元（将来のRLS用）──────────────────────────────────────────────

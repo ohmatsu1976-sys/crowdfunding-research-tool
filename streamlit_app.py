@@ -32,10 +32,12 @@ from research_crowdfunding import (
     get_contact_info,
 )
 from summary_table import build_summary_html
+import auth
 import auth_ui
 import candidates_ui
 import result_schema as rschema
 import search_state as sstate
+import summit_ui
 
 # ── ページ設定 ──────────────────────────────────────────────────────────────────
 
@@ -67,6 +69,16 @@ st.markdown("""
 # 検索フォーム・検索結果・AI分析へは到達しない（Anthropic API も呼ばれない）
 
 auth_client = auth_ui.require_login()
+
+# ── サミット特典ユーザー向け制限モード ──────────────────────────────────────────
+# app_metadata.role（本人が書き換えられないSupabaseのAdmin管理領域）が summit
+# の場合はここで専用の簡易画面だけを描画して停止する。以降の画面切替・候補保存・
+# マイ候補リスト・管理者ビュー・通常の商品リサーチ画面へは一切到達しない
+# （student・adminの画面構成は無変更）。
+
+if auth.get_role(st.session_state) == auth.ROLE_SUMMIT:
+    summit_ui.render(auth_client)
+    st.stop()
 
 # ── 画面切替（フェーズ3C／3D）─────────────────────────────────────────────────────
 # サイドバーの切替は常に表示する（管理者ビューはis_admin()が真の利用者にだけ出る）。

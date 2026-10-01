@@ -10,6 +10,7 @@ import streamlit as st
 
 import auth
 import candidates_ui
+import summit_ui
 
 # ログアウトや変更完了の直後に一度だけ見せる文言（認証情報とは別に持つ）
 FLASH = "auth_flash"
@@ -83,6 +84,7 @@ def _change_password_form(client, key_prefix: str) -> None:
                                        new_password, confirm)
     if ok:
         candidates_ui.clear_state(st.session_state)  # auth側でログアウト済み
+        summit_ui.clear_state(st.session_state)
         _flash(message)
         st.rerun()
     st.error(message)
@@ -99,6 +101,7 @@ def _first_login_screen(client) -> None:
     if st.button("ログアウト"):
         auth.sign_out(client, st.session_state)
         candidates_ui.clear_state(st.session_state)
+        summit_ui.clear_state(st.session_state)
         _flash("ログアウトしました。")
         st.rerun()
     st.stop()
@@ -110,6 +113,7 @@ def _sidebar(client) -> None:
         if st.button("ログアウト", width="stretch"):
             auth.sign_out(client, st.session_state)
             candidates_ui.clear_state(st.session_state)
+            summit_ui.clear_state(st.session_state)
             _flash("ログアウトしました。")
             st.rerun()
         with st.expander("パスワードを変更する"):
