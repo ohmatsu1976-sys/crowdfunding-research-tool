@@ -19,6 +19,8 @@ import auth  # noqa: E402
 import candidates_ui  # noqa: E402
 import result_schema as rschema  # noqa: E402
 import search_state as sstate  # noqa: E402
+import sender_profiles  # noqa: E402
+import sender_profiles_ui  # noqa: E402
 import summit_ui  # noqa: E402
 
 from streamlit.testing.v1 import AppTest  # noqa: E402
@@ -1469,6 +1471,478 @@ def test_summit_state_clears_on_logout():
     assert not at.exception, str(at.exception)
     assert auth.ROLE not in at.session_state.filtered_state
     assert summit_ui.RESULT_KEY not in at.session_state.filtered_state
+
+
+# ── 送信者プロフィール（sender_profiles）───────────────────────────────────────
+
+class _FakeSenderProfilesQuery:
+    def __init__(self, store, kind, payload=None):
+        self._store = store
+        self._kind = kind
+        self._payload = payload
+        self._filters = {}
+        self._neq_filters = {}
+        self._order = None
+
+    def select(self, columns):
+        return self
+
+    def eq(self, column, value):
+        self._filters[column] = value
+        return self
+
+    def neq(self, column, value):
+        self._neq_filters[column] = value
+        return self
+
+    def order(self, column, desc=False):
+        self._order = (column, desc)
+        return self
+
+    def _matches(self, row):
+        for k, v in self._filters.items():
+            if row.get(k) != v:
+                return False
+        for k, v in self._neq_filters.items():
+            if row.get(k) == v:
+                return False
+        return True
+
+    def _dup_exists(self, user_id, name, company, exclude_id=None):
+        for r in self._store["sender_profiles"]:
+            if exclude_id is not None and r.get("id") == exclude_id:
+                continue
+            if (r.get("user_id") == user_id and r.get("sender_name_en") == name
+                    and r.get("company_name_en", "") == company):
+                return True
+        return False
+
+    def execute(self):
+        rows = self._store["sender_profiles"]
+
+        if self._kind == "select":
+            matched = [r for r in rows if self._matches(r)]
+            if self._order:
+                col, desc = self._order
+                matched = sorted(matched, key=lambda r: r.get(col, ""), reverse=desc)
+            return _FakeCandResponse([dict(r) for r in matched])
+
+        if self._kind == "insert":
+            new_row = dict(self._payload or {})
+            name = new_row.get("sender_name_en", "")
+            company = new_row.get("company_name_en", "")
+            if self._dup_exists(new_row.get("user_id"), name, company):
+                err = RuntimeError("duplicate key value violates unique constraint")
+                err.code = "23505"
+                raise err
+            new_row.setdefault("id", f"sp-{len(rows) + 1}")
+            new_row.setdefault("company_name_en", "")
+            new_row.setdefault("is_default", False)
+            new_row.setdefault("last_used_at", None)
+            rows.append(new_row)
+            return _FakeCandResponse([dict(new_row)])
+
+        if self._kind == "update":
+            matched = [r for r in rows if self._matches(r)]
+            for r in matched:
+                r.update(self._payload or {})
+            return _FakeCandResponse([dict(r) for r in matched])
+
+        if self._kind == "delete":
+            matched = [r for r in rows if self._matches(r)]
+            self._store["sender_profiles"] = [r for r in rows if not self._matches(r)]
+            return _FakeCandResponse([dict(r) for r in matched])
+
+        raise AssertionError(f"未対応の操作: {self._kind}")
+
+
+class _FakeSenderProfilesTable:
+    def __init__(self, store):
+        self._store = store
+
+    def select(self, columns):
+        return _FakeSenderProfilesQuery(self._store, "select")
+
+    def insert(self, payload):
+        return _FakeSenderProfilesQuery(self._store, "insert", payload)
+
+    def update(self, payload):
+        return _FakeSenderProfilesQuery(self._store, "update", payload)
+
+    def delete(self):
+        return _FakeSenderProfilesQuery(self._store, "delete")
+
+
+class _FakeBoolRpcBuilder:
+    def __init__(self, value):
+        self._value = value
+
+    def execute(self):
+        return _FakeCandResponse(self._value)
+
+
+class _FakeSenderProfilesClient:
+    """送信者プロフィールのAppTest用の偽クライアント（sender_profilesテーブルのみ）"""
+
+    def __init__(self, profiles=None):
+        self._store = {"sender_profiles": [dict(r) for r in (profiles or [])]}
+        self.auth = _FakeCandAuth()
+
+    def table(self, name):
+        assert name == "sender_profiles", name
+        return _FakeSenderProfilesTable(self._store)
+
+    def rpc(self, fn, params=None):
+        # 画面切替の下見（is_admin）。本テストでは常にFalse（管理者ビューは対象外）
+        return _FakeBoolRpcBuilder(False)
+
+
+def _sp_profile(pid, name="Taro Yamada", company="", is_default=False, last_used_at=None,
+               user_id="test-user"):
+    return {"id": pid, "user_id": user_id, "sender_name_en": name,
+            "company_name_en": company, "is_default": is_default,
+            "last_used_at": last_used_at,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "updated_at": "2026-01-01T00:00:00+00:00"}
+
+
+def test_sender_profile_shows_registration_prompt_when_none_exist():
+    fake = _FakeSenderProfilesClient([])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    assert sender_profiles_ui.UNREGISTERED_NOTICE in _text(at)
+    run_btn = [b for b in at.button if b.label == "▶ リサーチ開始"][0]
+    assert run_btn.disabled is True, "プロフィール未登録なのに実行できる"
+
+
+def test_sender_profile_single_profile_is_auto_selected():
+    fake = _FakeSenderProfilesClient([_sp_profile("sp1", "Hirohito Ohmatsu", "Base on Base LLC")])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    assert at.session_state[sender_profiles_ui.SELECTED_ID] == "sp1"
+    assert any("Hirohito Ohmatsu" in opt for opt in at.selectbox[0].options)
+
+
+def test_sender_profile_dropdown_label_has_no_trailing_separator_without_company():
+    """会社名なしのプロフィールは、プルダウン表示に末尾の｜が残らない"""
+    fake = _FakeSenderProfilesClient([_sp_profile("sp1", "Hirohito Ohmatsu", "")])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+    finally:
+        supabase_module.create_client = original
+    options = list(at.selectbox[0].options)
+    assert any(o == "Hirohito Ohmatsu" for o in options), options
+    assert not any(o.endswith("｜") for o in options), options
+
+
+def test_sender_profile_create_new_profile_with_name_only():
+    """会社名・屋号は必須ではないため、氏名だけでも登録できる"""
+    fake = _FakeSenderProfilesClient([])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        name_box = [ti for ti in at.text_input if ti.label == "氏名（英語表記）"][0]
+        at = name_box.set_value("Hirohito Ohmatsu").run()
+        create_btn = [b for b in at.button if b.label == "プロフィールを登録する"][0]
+        at = create_btn.click().run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    assert sender_profiles.CREATE_OK in _text(at)
+    assert len(fake._store["sender_profiles"]) == 1
+    assert fake._store["sender_profiles"][0]["company_name_en"] == ""
+    options = list(at.selectbox[0].options)
+    assert any(o == "Hirohito Ohmatsu" for o in options), options
+
+
+def test_sender_profile_run_button_disabled_without_urls_even_with_profile():
+    fake = _FakeSenderProfilesClient([_sp_profile("sp1")])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+    finally:
+        supabase_module.create_client = original
+    run_btn = [b for b in at.button if b.label == "▶ リサーチ開始"][0]
+    assert run_btn.disabled is True, "URL未入力なのに実行できる"
+
+
+def test_sender_profile_run_button_enabled_with_profile_and_url():
+    fake = _FakeSenderProfilesClient([_sp_profile("sp1")])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        url_area = [ta for ta in at.text_area if "URL一覧" in ta.label][0]
+        at = url_area.set_value("https://www.kickstarter.com/projects/x/y").run()
+    finally:
+        supabase_module.create_client = original
+    run_btn = [b for b in at.button if b.label == "▶ リサーチ開始"][0]
+    assert run_btn.disabled is False
+
+
+def test_sender_profile_ambiguous_multiple_profiles_block_run_button():
+    """既定も使用履歴も無い複数プロフィールでは自動選択されず、実行もできない"""
+    fake = _FakeSenderProfilesClient([_sp_profile("sp1", "A"), _sp_profile("sp2", "B")])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        url_area = [ta for ta in at.text_area if "URL一覧" in ta.label][0]
+        at = url_area.set_value("https://www.kickstarter.com/projects/x/y").run()
+    finally:
+        supabase_module.create_client = original
+    assert at.session_state[sender_profiles_ui.SELECTED_ID] == ""
+    assert sender_profiles_ui.UNSELECTED_NOTICE in _text(at)
+    run_btn = [b for b in at.button if b.label == "▶ リサーチ開始"][0]
+    assert run_btn.disabled is True
+
+
+def test_sender_profile_dropdown_shows_multiple_profiles():
+    fake = _FakeSenderProfilesClient([
+        _sp_profile("sp1", "Taro Yamada", "Acme"),
+        _sp_profile("sp2", "Hirohito Ohmatsu", "Base on Base LLC"),
+    ])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+    finally:
+        supabase_module.create_client = original
+    options = list(at.selectbox[0].options)
+    assert any("Taro Yamada" in o for o in options)
+    assert any("Hirohito Ohmatsu" in o for o in options)
+
+
+def test_sender_profile_create_new_profile():
+    fake = _FakeSenderProfilesClient([])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        name_box = [ti for ti in at.text_input if ti.label == "氏名（英語表記）"][0]
+        at = name_box.set_value("Hirohito Ohmatsu").run()
+        company_box = [ti for ti in at.text_input if ti.label == "会社名・屋号（英語表記）"][0]
+        at = company_box.set_value("Base on Base LLC").run()
+        create_btn = [b for b in at.button if b.label == "プロフィールを登録する"][0]
+        at = create_btn.click().run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    assert sender_profiles.CREATE_OK in _text(at)
+    assert len(fake._store["sender_profiles"]) == 1
+    assert fake._store["sender_profiles"][0]["sender_name_en"] == "Hirohito Ohmatsu"
+    assert fake._store["sender_profiles"][0]["user_id"] == "test-user"
+
+
+def test_sender_profile_create_rejects_empty_name():
+    fake = _FakeSenderProfilesClient([])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        create_btn = [b for b in at.button if b.label == "プロフィールを登録する"][0]
+        at = create_btn.click().run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    assert sender_profiles.EMPTY_NAME in _text(at)
+    assert fake._store["sender_profiles"] == []
+
+
+def test_sender_profile_shows_warning_for_japanese_input():
+    """日本語入力の警告は、実際に日本語が入力された項目（氏名）だけを対象にする
+
+    会社名は未入力のままなので、警告文に「会社名」は出ない
+    （未入力の項目まで指摘すると誤解を招くため）。
+    """
+    fake = _FakeSenderProfilesClient([])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        name_box = [ti for ti in at.text_input if ti.label == "氏名（英語表記）"][0]
+        at = name_box.set_value("田中太郎").run()
+    finally:
+        supabase_module.create_client = original
+    warning = sender_profiles.japanese_warning("田中太郎", "")
+    assert warning in _text(at)
+    assert "氏名" in warning
+    assert "会社名" not in warning
+
+
+def test_sender_profile_japanese_warning_names_company_field_when_only_company_has_japanese():
+    fake = _FakeSenderProfilesClient([])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        name_box = [ti for ti in at.text_input if ti.label == "氏名（英語表記）"][0]
+        at = name_box.set_value("Taro Yamada").run()
+        company_box = [ti for ti in at.text_input if ti.label == "会社名・屋号（英語表記）"][0]
+        at = company_box.set_value("株式会社サンプル").run()
+    finally:
+        supabase_module.create_client = original
+    warning = sender_profiles.japanese_warning("Taro Yamada", "株式会社サンプル")
+    assert warning in _text(at)
+    assert "会社名" in warning
+    assert "氏名" not in warning
+
+
+def test_sender_profile_duplicate_registration_is_rejected():
+    fake = _FakeSenderProfilesClient([_sp_profile("sp1", "Taro Yamada", "Acme")])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        name_box = [ti for ti in at.text_input if ti.label == "氏名（英語表記）"][0]
+        at = name_box.set_value("Taro Yamada").run()
+        company_box = [ti for ti in at.text_input if ti.label == "会社名・屋号（英語表記）"][0]
+        at = company_box.set_value("Acme").run()
+        create_btn = [b for b in at.button if b.label == "プロフィールを登録する"][0]
+        at = create_btn.click().run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    assert sender_profiles.DUPLICATE in _text(at)
+    assert len(fake._store["sender_profiles"]) == 1, "重複登録されてしまっている"
+
+
+def test_sender_profile_edit_updates_name():
+    fake = _FakeSenderProfilesClient([_sp_profile("sp1", "Taro", "Old Co")])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        edit_name = [ti for ti in at.text_input if ti.key == "sprof_edit_name_sp1"][0]
+        at = edit_name.set_value("Taro Yamada").run()
+        update_btn = [b for b in at.button if b.key == "sprof_update_sp1"][0]
+        at = update_btn.click().run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    assert sender_profiles.UPDATE_OK in _text(at)
+    assert fake._store["sender_profiles"][0]["sender_name_en"] == "Taro Yamada"
+
+
+def test_sender_profile_delete_requires_confirmation():
+    fake = _FakeSenderProfilesClient([_sp_profile("sp1", "Taro Yamada")])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        delete_btn = [b for b in at.button if b.key == "sprof_delete_sp1"][0]
+        assert delete_btn.disabled is True, "確認前なのに削除ボタンが押せる"
+
+        confirm = [c for c in at.checkbox if c.key == "sprof_delconfirm_sp1"][0]
+        at = confirm.check().run()
+        delete_btn = [b for b in at.button if b.key == "sprof_delete_sp1"][0]
+        assert delete_btn.disabled is False
+        at = delete_btn.click().run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    assert sender_profiles.DELETE_OK in _text(at)
+    assert fake._store["sender_profiles"] == []
+
+
+def test_sender_profile_deleting_selected_clears_selection():
+    fake = _FakeSenderProfilesClient([_sp_profile("sp1", "Taro Yamada")])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        assert at.session_state[sender_profiles_ui.SELECTED_ID] == "sp1"
+        confirm = [c for c in at.checkbox if c.key == "sprof_delconfirm_sp1"][0]
+        at = confirm.check().run()
+        delete_btn = [b for b in at.button if b.key == "sprof_delete_sp1"][0]
+        at = delete_btn.click().run()
+    finally:
+        supabase_module.create_client = original
+    assert at.session_state[sender_profiles_ui.SELECTED_ID] == ""
+
+
+def test_sender_profile_state_clears_on_logout():
+    fake = _FakeSenderProfilesClient([_sp_profile("sp1", "Taro Yamada")])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        assert not at.exception, str(at.exception)
+        at.session_state["sprof_delconfirm_sp1"] = True
+        at = at.run()
+        logout = [b for b in at.button if "ログアウト" in b.label]
+        assert logout, "ログアウトボタンが見つからない"
+        at = logout[0].click().run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    for key in at.session_state.filtered_state:
+        assert not str(key).startswith("sprof_"), f"{key} が残っている"
+
+
+def test_sender_profile_not_shown_in_summit_mode():
+    """サミット特典版には元々この入力が無いため、追加しない"""
+    at = _summit_app().run()
+    assert not at.exception, str(at.exception)
+    assert not any("送信者プロフィール" in e.label for e in at.expander), (
+        "サミット特典版に送信者プロフィールの見出しが出ている"
+    )
+    assert list(at.selectbox) == [], "サミット特典版にプロフィール選択欄が出ている"
+    assert not any(str(k).startswith("sprof_") for k in at.session_state.filtered_state)
+
+
+def test_research_screen_still_shows_step1_with_sender_profile_panel():
+    """送信者プロフィール導入後も、既存のStep1〜2の構成は維持されている"""
+    fake = _FakeSenderProfilesClient([_sp_profile("sp1", "Taro Yamada")])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    body = _text(at)
+    assert "Step 1" in body
+    assert "Step 2" in body
+    assert any("送信者プロフィール" in e.label for e in at.expander), (
+        "送信者プロフィールの見出しが出ていない"
+    )
+
+
+def test_streamlit_app_passes_selected_profile_to_analysis():
+    """選択中プロフィールの氏名・会社名が、既存のanalyze_with_claude呼び出しへ
+    そのまま渡る配線になっている（メール生成処理自体は変更していないことの確認）"""
+    from pathlib import Path
+    text = Path("streamlit_app.py").read_text(encoding="utf-8")
+    assert "sender_profiles_ui.render_selector(auth_client)" in text
+    assert "sender_name, sender_company = sender_profiles_ui.render_selector" in text
+    assert "analyze_with_claude(p, client, _sender_name, _sender_company" in text
+
+
+def test_streamlit_app_touches_last_used_on_run():
+    from pathlib import Path
+    text = Path("streamlit_app.py").read_text(encoding="utf-8")
+    idx_run = text.index("if run:")
+    idx_touch = text.index("sender_profiles.touch_last_used(")
+    idx_api = text.index('st.secrets["ANTHROPIC_API_KEY"]')
+    assert idx_run < idx_touch < idx_api, (
+        "touch_last_usedの呼び出しが、実行ボタン押下の処理の中の、"
+        "API呼び出しより前にない"
+    )
 
 
 if __name__ == "__main__":

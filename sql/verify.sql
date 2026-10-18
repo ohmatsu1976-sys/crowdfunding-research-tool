@@ -416,6 +416,122 @@ with checks as (
         (select count(*)::text from public.app_admins),
         (select count(*) from public.app_admins) >= 1,
         null
+
+    -- ═══ 0006_sender_profiles.sql の検査 ═══════════════════════════════════
+    -- ── 26. sender_profilesテーブルが存在する ────────────────────────────────
+    union all
+    select 100, 'sender_profilesテーブルが存在する', 'true',
+        (to_regclass('public.sender_profiles') is not null)::text,
+        to_regclass('public.sender_profiles') is not null,
+        null
+
+    -- ── 27. sender_profilesでRLSが有効 ──────────────────────────────────────
+    union all
+    select 101, 'sender_profilesでRLSが有効', 'true',
+        (select relrowsecurity from pg_class where oid = to_regclass('public.sender_profiles'))::text,
+        (select relrowsecurity from pg_class where oid = to_regclass('public.sender_profiles')),
+        null
+
+    -- ── 28. sender_profilesのポリシー数（select/insert/update/delete の4つ）──
+    union all
+    select 102, 'sender_profilesのポリシー数', '4',
+        (select count(*) from pg_policies
+          where schemaname='public' and tablename='sender_profiles')::text,
+        (select count(*) from pg_policies
+          where schemaname='public' and tablename='sender_profiles') = 4,
+        null
+
+    -- ── 29. anon が sender_profiles の権限を一切持たない ─────────────────────
+    union all
+    select 103, 'anon がsender_profilesのSELECT/INSERT/UPDATE/DELETEを一切持たない', '0',
+        (select count(*) from (values
+            (has_table_privilege('anon','public.sender_profiles','SELECT')),
+            (has_table_privilege('anon','public.sender_profiles','INSERT')),
+            (has_table_privilege('anon','public.sender_profiles','UPDATE')),
+            (has_table_privilege('anon','public.sender_profiles','DELETE'))
+        ) t(v) where v)::text,
+        (select count(*) from (values
+            (has_table_privilege('anon','public.sender_profiles','SELECT')),
+            (has_table_privilege('anon','public.sender_profiles','INSERT')),
+            (has_table_privilege('anon','public.sender_profiles','UPDATE')),
+            (has_table_privilege('anon','public.sender_profiles','DELETE'))
+        ) t(v) where v) = 0,
+        null
+
+    -- ── 30. sender_profilesのUPDATE可能列はsender_name_en/company_name_en/
+    --        is_default/last_used_atの4つだけ（user_id/id/created_at/updated_atは不可）
+    union all
+    select 104, 'sender_profilesで更新できるのはsender_name_en/company_name_en/is_default/last_used_atだけ',
+        'sender_name_en,company_name_en,is_default,last_used_at',
+        concat_ws(',',
+            case when has_column_privilege('authenticated','public.sender_profiles','sender_name_en','UPDATE')
+                 then 'sender_name_en' end,
+            case when has_column_privilege('authenticated','public.sender_profiles','company_name_en','UPDATE')
+                 then 'company_name_en' end,
+            case when has_column_privilege('authenticated','public.sender_profiles','is_default','UPDATE')
+                 then 'is_default' end,
+            case when has_column_privilege('authenticated','public.sender_profiles','last_used_at','UPDATE')
+                 then 'last_used_at' end,
+            case when has_column_privilege('authenticated','public.sender_profiles','id','UPDATE')
+                 then 'id(想定外)' end,
+            case when has_column_privilege('authenticated','public.sender_profiles','user_id','UPDATE')
+                 then 'user_id(想定外)' end,
+            case when has_column_privilege('authenticated','public.sender_profiles','created_at','UPDATE')
+                 then 'created_at(想定外)' end,
+            case when has_column_privilege('authenticated','public.sender_profiles','updated_at','UPDATE')
+                 then 'updated_at(想定外)' end
+        ),
+        concat_ws(',',
+            case when has_column_privilege('authenticated','public.sender_profiles','sender_name_en','UPDATE')
+                 then 'sender_name_en' end,
+            case when has_column_privilege('authenticated','public.sender_profiles','company_name_en','UPDATE')
+                 then 'company_name_en' end,
+            case when has_column_privilege('authenticated','public.sender_profiles','is_default','UPDATE')
+                 then 'is_default' end,
+            case when has_column_privilege('authenticated','public.sender_profiles','last_used_at','UPDATE')
+                 then 'last_used_at' end,
+            case when has_column_privilege('authenticated','public.sender_profiles','id','UPDATE')
+                 then 'id(想定外)' end,
+            case when has_column_privilege('authenticated','public.sender_profiles','user_id','UPDATE')
+                 then 'user_id(想定外)' end,
+            case when has_column_privilege('authenticated','public.sender_profiles','created_at','UPDATE')
+                 then 'created_at(想定外)' end,
+            case when has_column_privilege('authenticated','public.sender_profiles','updated_at','UPDATE')
+                 then 'updated_at(想定外)' end
+        ) = 'sender_name_en,company_name_en,is_default,last_used_at',
+        null
+
+    -- ── 31. sender_profilesのINSERTポリシーがauth.uid()とのWITH CHECKを持つ ─
+    --        （他人のuser_idを指定して登録できないことの構造的証拠）
+    union all
+    select 105, 'sender_profilesのINSERTポリシーがauth.uid()とのWITH CHECKを持つ', 'true',
+        ((select count(*) from pg_policies
+           where schemaname='public' and tablename='sender_profiles'
+             and cmd = 'INSERT' and with_check ilike '%auth.uid()%') = 1)::text,
+        (select count(*) from pg_policies
+          where schemaname='public' and tablename='sender_profiles'
+            and cmd = 'INSERT' and with_check ilike '%auth.uid()%') = 1,
+        null
+
+    -- ── 32. sender_profilesに(user_id,sender_name_en,company_name_en)の
+    --        一意制約がある（重複登録・二重クリック対策の最終防御）────────────
+    union all
+    select 106, 'sender_profilesに(user_id,sender_name_en,company_name_en)の一意制約がある', 'true',
+        ((select count(*) from pg_constraint where conname = 'sender_profiles_unique_per_user') = 1)::text,
+        (select count(*) from pg_constraint where conname = 'sender_profiles_unique_per_user') = 1,
+        null
+
+    -- ── 33. sender_profilesで同一利用者につきis_default=trueが最大1件に
+    --        DB側（部分一意索引）で制限されている ──────────────────────────────
+    union all
+    select 107, 'sender_profilesのis_defaultがuser_idごとに部分一意索引で制限されている', 'true',
+        ((select count(*) from pg_indexes
+           where schemaname='public' and tablename='sender_profiles'
+             and indexname='sender_profiles_one_default_per_user') = 1)::text,
+        (select count(*) from pg_indexes
+          where schemaname='public' and tablename='sender_profiles'
+            and indexname='sender_profiles_one_default_per_user') = 1,
+        null
 )
 
 -- ── 総合結果（すべての行のok列を一括確認する用）─────────────────────────────

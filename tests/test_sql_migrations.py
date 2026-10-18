@@ -29,6 +29,7 @@ MIGRATION_FILES = [
     "0002_functions.sql",
     "0003_rls_grants.sql",
     "0004_backfill_profiles.sql",
+    "0006_sender_profiles.sql",
 ]
 EXAMPLE_FILES = ["0005_admin.sql.example"]
 ALL_SQL_FILES = (
@@ -480,6 +481,118 @@ def test_verify_sql_uses_privilege_functions_not_role_scoped_views():
     assert "role_table_grants" not in text
     assert "role_routine_grants" not in text
     assert "column_privileges" not in text or "has_column_privilege" in text
+
+
+# ── 7. sender_profiles（送信者プロフィール・0006）───────────────────────────────
+
+def test_sender_profiles_table_has_rls_enabled():
+    text = _strip_sql_comments(_read(MIGRATIONS_DIR / "0006_sender_profiles.sql")).lower()
+    assert re.search(r"alter\s+table\s+public\.sender_profiles\s+enable\s+row\s+level\s+security",
+                     text), "sender_profilesでRLSが有効化されていない"
+
+
+def test_sender_profiles_revokes_all_before_column_grants():
+    """0001〜0005と同じ順序: revoke all → 列単位のGRANT"""
+    text = _strip_sql_comments(_read(MIGRATIONS_DIR / "0006_sender_profiles.sql")).lower()
+    revoke_pos = text.find("revoke all")
+    grant_pos = text.find("grant select (")
+    assert revoke_pos != -1 and grant_pos != -1
+    assert revoke_pos < grant_pos, "revoke all より前に列GRANTが書かれている（順序ミス）"
+
+
+def test_sender_profiles_has_four_own_row_policies():
+    """select/insert/update/delete の4ポリシーがすべてuser_id=auth.uid()で絞られている"""
+    text = _strip_sql_comments(_read(MIGRATIONS_DIR / "0006_sender_profiles.sql"))
+    policies = re.findall(r"create\s+policy\s+(\w+)\s+on\s+public\.sender_profiles", text, re.I)
+    assert len(policies) == 4, f"ポリシー数が4ではない: {policies}"
+    assert text.lower().count("auth.uid()") >= 4, "auth.uid()で絞っている箇所が少ない"
+
+
+def test_sender_profiles_insert_policy_checks_auth_uid():
+    """他人のuser_idで登録できないよう、INSERTにWITH CHECKがある"""
+    text = _strip_sql_comments(_read(MIGRATIONS_DIR / "0006_sender_profiles.sql"))
+    m = re.search(
+        r"create\s+policy\s+sender_profiles_insert_own\s+on\s+public\.sender_profiles"
+        r"\s+for\s+insert\s+to\s+authenticated\s+with\s+check\s*\(([^)]*auth\.uid\(\)[^)]*)\)",
+        text, re.I | re.S)
+    assert m, "sender_profiles_insert_ownにauth.uid()とのWITH CHECKが見つからない"
+
+
+def test_sender_profiles_update_grant_excludes_ownership_columns():
+    """UPDATE可能列にuser_id/id/created_at/updated_atが無い（saved_itemsと同じ発想）"""
+    text = _strip_sql_comments(_read(MIGRATIONS_DIR / "0006_sender_profiles.sql"))
+    m = re.search(
+        r"grant\s+update\s*\(([^)]*)\)\s*\n?\s*on\s+public\.sender_profiles", text, re.I)
+    assert m, "sender_profilesのGRANT UPDATEが見つからない"
+    columns = {c.strip() for c in m.group(1).split(",")}
+    assert columns == {"sender_name_en", "company_name_en", "is_default", "last_used_at"}, columns
+
+
+def test_sender_profiles_has_unique_constraint_on_name_and_company():
+    """同一利用者が氏名+会社名の完全一致を重複登録できない一意制約がある"""
+    text = _strip_sql_comments(_read(MIGRATIONS_DIR / "0006_sender_profiles.sql"))
+    assert re.search(
+        r"constraint\s+sender_profiles_unique_per_user\s+unique\s*\("
+        r"\s*user_id\s*,\s*sender_name_en\s*,\s*company_name_en\s*\)",
+        text, re.I), "一意制約(user_id, sender_name_en, company_name_en)が見つからない"
+
+
+def test_sender_profiles_does_not_grant_insert_delete_to_anon():
+    """anonへの権限付与が一切無い"""
+    text = _strip_sql_comments(_read(MIGRATIONS_DIR / "0006_sender_profiles.sql")).lower()
+    assert not re.search(r"to\s+anon\b", text), "anonへの権限付与がある"
+
+
+def test_sender_profiles_not_used_for_auth_or_role_decisions():
+    """送信者プロフィールのテーブル・ポリシーが、role判定・is_admin判定に使われていない
+
+    説明コメント中の言及（「app_metadata.roleとは無関係」等）は対象外にする。
+    実際のコードで app_metadata / is_admin を参照していないことだけを見る。
+    """
+    text = _strip_sql_comments(_read(MIGRATIONS_DIR / "0006_sender_profiles.sql")).lower()
+    for forbidden in ("app_metadata", "is_admin"):
+        assert forbidden not in text, f"{forbidden} が0006のコードに含まれている（権限判定との混在の疑い）"
+
+
+def test_sender_profiles_has_one_default_per_user_partial_unique_index():
+    """同一利用者がis_default=trueを複数持てないことをDB側（部分一意索引）でも保証する
+
+    アプリ側の_clear_other_defaultsは「先に他をfalseへ戻す」事前処理であり、
+    同時更新・複数タブからの競合は防げない。DB側の部分一意索引が最終防御になる。
+    """
+    text = _strip_sql_comments(_read(MIGRATIONS_DIR / "0006_sender_profiles.sql"))
+    assert re.search(
+        r"create\s+unique\s+index\s+if\s+not\s+exists\s+sender_profiles_one_default_per_user"
+        r"\s+on\s+public\.sender_profiles\s*\(\s*user_id\s*\)\s*where\s+is_default",
+        text, re.I), "is_defaultの部分一意索引(user_id)が見つからない"
+
+
+def test_sender_profiles_migration_statements_are_all_safely_rerunnable():
+    """0006を複数回実行しても壊れない（既存テーブルへの追加実行も含む）ことの静的証拠
+
+    create table/index/trigger/policy が、ガード（if not exists /
+    drop ... if exists の直後）なしに書かれていないことを確認する。
+    一度本番へ適用した後に、このファイルへ追記したものを含めて再実行しても
+    エラーにならないという保証の根拠になる。
+    """
+    text = _strip_sql_comments(_read(MIGRATIONS_DIR / "0006_sender_profiles.sql"))
+
+    # bare CREATE TABLE / CREATE INDEX / CREATE UNIQUE INDEX は禁止（ifnotexists必須）
+    for m in re.finditer(r"create\s+(unique\s+index|index|table)\s+(\S+)", text, re.I):
+        assert m.group(2).lower() == "if", (
+            f"ガード(if not exists)の無い CREATE が見つかった: {m.group(0)!r}"
+        )
+
+    # CREATE POLICY / CREATE TRIGGER は、同名の DROP ... IF EXISTS が直前にあること
+    for kind, name in re.findall(
+            r"create\s+(policy|trigger)\s+(\w+)\s+on\s+public\.sender_profiles",
+            text, re.I):
+        drop_pattern = re.compile(
+            rf"drop\s+{kind}\s+if\s+exists\s+{re.escape(name)}\s+on\s+public\.sender_profiles",
+            re.I)
+        assert drop_pattern.search(text), (
+            f"{kind} {name} の前に drop ... if exists が無い（再実行時に失敗する）"
+        )
 
 
 if __name__ == "__main__":

@@ -325,5 +325,73 @@ def test_unknown_count_value_is_rejected_by_bind_check():
     raise AssertionError("未知の引数が通ってしまい、互換検査が機能していない")
 
 
+# ── 送信者プロフィールのinsert/update/delete（sender_profiles.py）───────────────
+# sender_profiles.py が実際に組み立てる呼び出し（table().insert()/.update()/
+# .delete() → .eq()/.neq() → .execute()）が実SDKのシグネチャに束縛できることを
+# 確認する。通信はしない（テーブル・クライアントの実体には一切触れない）。
+
+def test_sender_profiles_insert_signature_accepts_json_payload():
+    """新規登録の組み立て方（insert→execute）が実SDKで通る"""
+    client = _supabase_client()
+    ins = client.table("sender_profiles").insert({
+        "user_id": "u1", "sender_name_en": "Taro Yamada",
+        "company_name_en": "Acme", "is_default": False,
+    })
+    assert hasattr(ins, "execute")
+    _bind(ins.execute)
+
+
+def test_sender_profiles_update_eq_execute_signature():
+    """更新の組み立て方（update→eq→eq→execute）が実SDKで通る"""
+    client = _supabase_client()
+    u = client.table("sender_profiles").update({"sender_name_en": "x"})
+    _bind(u.eq, "id", "sid-1")
+    u = u.eq("id", "sid-1")
+    _bind(u.eq, "user_id", "u1")
+    u = u.eq("user_id", "u1")
+    assert hasattr(u, "execute")
+    _bind(u.execute)
+
+
+def test_sender_profiles_clear_default_uses_eq_and_neq():
+    """既定フラグの一括解除（update→eq→eq→neq→execute）が実SDKで通る"""
+    client = _supabase_client()
+    u = client.table("sender_profiles").update({"is_default": False})
+    _bind(u.eq, "user_id", "u1")
+    u = u.eq("user_id", "u1")
+    _bind(u.eq, "is_default", True)
+    u = u.eq("is_default", True)
+    _bind(u.neq, "id", "sid-1")
+    u = u.neq("id", "sid-1")
+    assert hasattr(u, "execute")
+    _bind(u.execute)
+
+
+def test_sender_profiles_delete_eq_execute_signature():
+    """削除の組み立て方（delete→eq→eq→execute）が実SDKで通る"""
+    client = _supabase_client()
+    d = client.table("sender_profiles").delete()
+    _bind(d.eq, "id", "sid-1")
+    d = d.eq("id", "sid-1")
+    _bind(d.eq, "user_id", "u1")
+    d = d.eq("user_id", "u1")
+    assert hasattr(d, "execute")
+    _bind(d.execute)
+
+
+def test_sender_profiles_select_order_execute_signature():
+    """一覧取得の組み立て方（select→eq→order→execute）が実SDKで通る"""
+    client = _supabase_client()
+    q = client.table("sender_profiles").select(
+        "id,user_id,sender_name_en,company_name_en,is_default,last_used_at,"
+        "created_at,updated_at")
+    _bind(q.eq, "user_id", "u1")
+    q = q.eq("user_id", "u1")
+    _bind(q.order, "sender_name_en")
+    q = q.order("sender_name_en")
+    assert hasattr(q, "execute")
+    _bind(q.execute)
+
+
 if __name__ == "__main__":
     sys.exit(run(dict(globals()), "実SDK引数互換テスト（HTTP通信なし）"))

@@ -37,6 +37,8 @@ import auth_ui
 import candidates_ui
 import result_schema as rschema
 import search_state as sstate
+import sender_profiles
+import sender_profiles_ui
 import summit_ui
 
 # ── ページ設定 ──────────────────────────────────────────────────────────────────
@@ -173,23 +175,11 @@ st.caption(
     "日本販売可能性・競合・営業メールを AI が自動分析します"
 )
 
-# ── 送信者情報入力 ──────────────────────────────────────────────────────────────
-with st.expander("📝 営業メールの送信者名を入力してください", expanded=True):
-    col_name, col_company = st.columns(2)
-    with col_name:
-        sender_name = st.text_input(
-            "氏名（英語表記）",
-            placeholder="例：Taro Yamada",
-            help="営業メールの署名（Best regards 以下）に使用されます"
-        )
-    with col_company:
-        sender_company = st.text_input(
-            "会社名・屋号（任意）",
-            placeholder="例：〇〇 Trading（空欄でもOK）",
-            help="入力すると、自己紹介（My name is ... from ○○）と署名に反映されます。空欄なら省略されます"
-        )
-    if not sender_name:
-        st.caption("⚠️ 未入力の場合、署名は [Your Name] のまま出力されます（あとから差し替え可）")
+# ── 送信者プロフィール ──────────────────────────────────────────────────────────
+# 氏名・会社名の手入力欄を、Supabaseへ保存したプロフィールの選択に置き換える
+# （ブラウザ更新・ログアウト・別端末からの再ログインでも使える）。
+sender_name, sender_company = sender_profiles_ui.render_selector(auth_client)
+_sender_profile_id = st.session_state.get(sender_profiles_ui.SELECTED_ID, "")
 
 min_jpy = int(MIN_RAISED_USD * JPY_PER_USD / 1_000_000)
 max_jpy = int(MAX_RAISED_USD * JPY_PER_USD / 1_000_000)
@@ -273,7 +263,7 @@ with col_btn:
     run = st.button(
         "▶ リサーチ開始",
         type="primary",
-        disabled=(len(urls) == 0),
+        disabled=(len(urls) == 0 or not sender_name),
         width="stretch",
     )
 with col_note:
@@ -281,8 +271,16 @@ with col_note:
         "1件あたり約 **30〜60秒** かかります。"
         "ブラウザを閉じないでください。"
     )
+    if not sender_name:
+        st.caption("⚠️ 送信者プロフィールを選択すると「▶ リサーチ開始」が押せます")
 
 if run:
+    # 選択中のプロフィールを「最後に使用した」として記録する
+    # （次回ログイン時の自動選択に使う。失敗しても検索は止めない）
+    if _sender_profile_id:
+        sender_profiles.touch_last_used(auth_client, st.session_state.get(auth.USER_ID, ""),
+                                        _sender_profile_id)
+
     # APIキー取得
     try:
         api_key = st.secrets["ANTHROPIC_API_KEY"]
@@ -336,7 +334,8 @@ if run:
             sstate.record_failure(st.session_state, _msg)
             st.rerun()
 
-    # 送信者情報をsession_stateに保持してClaude分析に渡す
+    # 送信者プロフィール（選択済みであることはボタンのdisabled条件で保証済み。
+    # 念のための安全側フォールバックとして残す）
     _sender_name    = sender_name    if sender_name    else "【氏名】"
     _sender_company = sender_company if sender_company else "【会社名・屋号】"
 

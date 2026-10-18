@@ -17,6 +17,7 @@ Supabase 管理画面 → SQL Editor で、**この順に、続けて**実行す
 | 3 | `migrations/0003_rls_grants.sql` | RLS有効化・ポリシー・GRANT / REVOKE |
 | 4 | `migrations/0004_backfill_profiles.sql` | 既存利用者の profiles 初期登録 |
 | 5 | `migrations/0005_admin.sql.example` | 管理者の登録（**雛形**。user_id を差し替えて実行） |
+| 6 | `migrations/0006_sender_profiles.sql` | `sender_profiles` テーブル・RLS・GRANT（送信者プロフィール） |
 
 最後に `verify.sql` を実行する。Supabase SQL Editor は複数の SELECT のうち
 最後の結果しか表示しないため、`verify.sql` は全検査を UNION ALL で
@@ -42,6 +43,7 @@ Supabase 管理画面 → SQL Editor で、**この順に、続けて**実行す
 | `saved_items` | 自分の行のみ（閲覧・更新・削除） | 全件（**閲覧のみ**） | なし |
 | `profiles` | 自分の行のみ（表示名だけ更新可） | 全件（**閲覧のみ**） | なし |
 | `app_admins` | **到達できない** | 到達できない | なし |
+| `sender_profiles` | 自分の行のみ（閲覧・登録・更新・削除） | 自分の行のみ（管理者の特別扱いなし） | なし |
 
 `app_admins` はポリシーを1つも作らず、権限も与えていない。
 読めるのは `SECURITY DEFINER` 関数 `public.is_admin()` だけ。
@@ -69,7 +71,8 @@ INSERT ポリシーも1つも無い。
 
 ## 確認すること（`verify.sql`）
 
-25個の検査を1行ずつ行う（結果表は上から順にこの並び）。
+33個の検査を1行ずつ行う（結果表は上から順にこの並び）。先頭25個は0001〜0005の、
+残り8個（26〜33）は0006（`sender_profiles`）の検査。
 
 1. 4テーブルが存在する
 2. 4テーブルすべてで RLS が有効
@@ -92,6 +95,15 @@ INSERT ポリシーも1つも無い。
 18. トリガー4本・インデックス2本・一意制約2件が存在する
 19. `profiles` の件数が `auth.users` と一致する
 20. `app_admins` に管理者が1名以上登録されている
+21. `sender_profiles` テーブルが存在する
+22. `sender_profiles` で RLS が有効
+23. `sender_profiles` のポリシー数（4）
+24. `anon` が `sender_profiles` の SELECT/INSERT/UPDATE/DELETE を一切持たない
+25. `sender_profiles` で更新できるのは `sender_name_en`/`company_name_en`/`is_default`/`last_used_at` だけ
+26. `sender_profiles` の INSERT ポリシーが `auth.uid()` との WITH CHECK を持つ
+27. `sender_profiles` に `(user_id, sender_name_en, company_name_en)` の一意制約がある
+28. `sender_profiles` の `is_default` が `user_id` ごとに部分一意索引で制限されている
+    （1利用者につき `is_default=true` は最大1件。同時更新の競合もDB側で防ぐ）
 
 いずれも `has_table_privilege()` / `has_column_privilege()` /
 `has_function_privilege()` を使う。これらは指定したロール名の実際のACLを
@@ -122,6 +134,16 @@ drop table if exists public.saved_items;   -- products より先（外部キー�
 drop table if exists public.products;
 drop table if exists public.profiles;
 drop table if exists public.app_admins;
+commit;
+```
+
+**`sender_profiles`（0006）だけを戻す**ときは、他のテーブルとは独立しているため
+これだけで良い：
+
+```sql
+begin;
+drop trigger if exists sender_profiles_set_updated_at on public.sender_profiles;
+drop table if exists public.sender_profiles;
 commit;
 ```
 

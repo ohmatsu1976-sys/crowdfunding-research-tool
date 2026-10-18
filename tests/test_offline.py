@@ -121,6 +121,64 @@ def test_unknown_maker_never_reaches_sales_email():
     assert "[Brand / Team Name]" in body
 
 
+# ── 送信者プロフィール: 会社名・屋号が任意であることの、メール生成側の実証 ──────
+# 氏名は必須・会社名は任意（sender_profiles.py側）。ここでは
+# streamlit_app.py → analyze_with_claude() → build_approach_email() という
+# 実際の経路で、会社名が空のときに最終出力（件名・本文）へ何が残るかを検証する。
+
+def test_approach_email_without_company_has_no_placeholder_leak():
+    """会社名が空でも「【会社名・屋号】」「[Company / Business Name]」が本文に残らない"""
+    body = r.build_approach_email(
+        {"name": "Widget", "maker": "Acme"},
+        sender_name="Hirohito Ohmatsu", sender_company="",
+    )["approach_body"]
+    assert "【会社名・屋号】" not in body
+    assert "[Company / Business Name]" not in body
+
+
+def test_approach_email_without_company_signature_is_name_only():
+    """会社名が空のとき、署名は氏名だけで自然に成立する（会社名の行が無い）"""
+    body = r.build_approach_email(
+        {"name": "Widget", "maker": "Acme"},
+        sender_name="Hirohito Ohmatsu", sender_company="",
+    )["approach_body"]
+    assert body.endswith("Best regards,\nHirohito Ohmatsu"), body[-80:]
+    assert "My name is Hirohito Ohmatsu, and I am based in Japan." in body
+    assert "My name is Hirohito Ohmatsu from" not in body
+
+
+def test_approach_email_without_company_has_no_stray_blank_lines_or_separators():
+    """会社名が空でも不要な空行・区切り記号（｜等）が残らない"""
+    body = r.build_approach_email(
+        {"name": "Widget", "maker": "Acme"},
+        sender_name="Hirohito Ohmatsu", sender_company="",
+    )["approach_body"]
+    assert "\n\n\n" not in body, "3行以上の連続空行が残っている"
+    assert "｜" not in body
+
+
+def test_approach_email_with_company_shows_both_name_and_company():
+    """会社名がある場合は、従来どおり氏名・会社名の両方が本文へ反映される"""
+    body = r.build_approach_email(
+        {"name": "Widget", "maker": "Acme"},
+        sender_name="Hirohito Ohmatsu", sender_company="Base on Base LLC",
+    )["approach_body"]
+    assert "My name is Hirohito Ohmatsu from Base on Base LLC" in body
+    assert body.endswith("Best regards,\nHirohito Ohmatsu\nBase on Base LLC")
+
+
+def test_approach_email_treats_streamlit_safety_net_company_placeholder_as_empty():
+    """streamlit_app.py の安全側フォールバック文字列「【会社名・屋号】」も、
+    build_approach_email側では未入力として扱われ、本文に残らない
+    （sender_profilesで会社名が空の行を選んだときに通る実際の経路）"""
+    body = r.build_approach_email(
+        {"name": "Widget", "maker": "Acme"},
+        sender_name="Hirohito Ohmatsu", sender_company="【会社名・屋号】",
+    )["approach_body"]
+    assert "【会社名・屋号】" not in body
+    assert body.endswith("Best regards,\nHirohito Ohmatsu")
+
+
 def test_stats_json_branch_reuses_slug_logic(monkeypatched=True):
     """stats.json経路のメーカー名が一般語(rest)にならない"""
     original = r._kicktraq_project
