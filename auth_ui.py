@@ -10,6 +10,7 @@ import streamlit as st
 
 import auth
 import candidates_ui
+import kickstarter_discovery_ui
 import sender_profiles_ui
 import summit_ui
 
@@ -87,6 +88,7 @@ def _change_password_form(client, key_prefix: str) -> None:
         candidates_ui.clear_state(st.session_state)  # auth側でログアウト済み
         summit_ui.clear_state(st.session_state)
         sender_profiles_ui.clear_state(st.session_state)
+        kickstarter_discovery_ui.clear_state(st.session_state)
         _flash(message)
         st.rerun()
     st.error(message)
@@ -105,6 +107,7 @@ def _first_login_screen(client) -> None:
         candidates_ui.clear_state(st.session_state)
         summit_ui.clear_state(st.session_state)
         sender_profiles_ui.clear_state(st.session_state)
+        kickstarter_discovery_ui.clear_state(st.session_state)
         _flash("ログアウトしました。")
         st.rerun()
     st.stop()
@@ -118,6 +121,7 @@ def _sidebar(client) -> None:
             candidates_ui.clear_state(st.session_state)
             summit_ui.clear_state(st.session_state)
             sender_profiles_ui.clear_state(st.session_state)
+            kickstarter_discovery_ui.clear_state(st.session_state)
             _flash("ログアウトしました。")
             st.rerun()
         with st.expander("パスワードを変更する"):

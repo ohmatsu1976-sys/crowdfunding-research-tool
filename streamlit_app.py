@@ -35,6 +35,7 @@ from summary_table import build_summary_html
 import auth
 import auth_ui
 import candidates_ui
+import kickstarter_discovery_ui
 import result_schema as rschema
 import search_state as sstate
 import sender_profiles
@@ -90,6 +91,9 @@ if auth.get_role(st.session_state) == auth.ROLE_SUMMIT:
 
 candidates_ui.render_view_switch(auth_client)
 _current_view = candidates_ui.get_view(st.session_state)
+if _current_view == candidates_ui.VIEW_DISCOVER:
+    kickstarter_discovery_ui.render_screen(auth_client)
+    st.stop()
 if _current_view == candidates_ui.VIEW_LIST:
     candidates_ui.render_list_screen(auth_client)
     st.stop()
@@ -206,11 +210,25 @@ PLACEHOLDER = (
     "（URLを1行1件で貼り付けてください）"
 )
 
+URL_INPUT_KEY = "url_input_text"
+
+# 「商品を探す」画面で選んだURLを、ウィジェット描画より前に入力欄へ反映する
+# （描画後に session_state を書き換えるとStreamlitが例外にするため）
+if kickstarter_discovery_ui.PENDING_HANDOFF_URL in st.session_state:
+    _pending_url = st.session_state.pop(kickstarter_discovery_ui.PENDING_HANDOFF_URL)
+    _existing_urls = st.session_state.get(URL_INPUT_KEY, "")
+    if _pending_url and _pending_url not in _existing_urls:
+        st.session_state[URL_INPUT_KEY] = (
+            (_existing_urls.rstrip() + "\n" + _pending_url).strip()
+            if _existing_urls.strip() else _pending_url
+        )
+
 urls_text = st.text_area(
     label="URL一覧（1行1件）",
     height=220,
     placeholder=PLACEHOLDER,
     help="#で始まる行はコメントとして無視されます",
+    key=URL_INPUT_KEY,
 )
 
 # URL + 金額のパース

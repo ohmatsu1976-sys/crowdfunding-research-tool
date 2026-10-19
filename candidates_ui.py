@@ -22,6 +22,12 @@ import candidates
 SAVED_URLS = "cand_saved_urls"        # 今回のセッションで保存に成功したURL
 LAST_MESSAGE = "cand_last_message"    # 直近の操作結果メッセージ（表示後に消す）
 VIEW = "cand_view"                    # 画面切替（商品をリサーチ／マイ候補リスト／管理者ビュー）
+# st.radio(key=VIEW)が描画された後（同じ実行内）にVIEWへ直接代入すると、
+# Streamlitが「instantiated後のウィジェットキー変更」として例外にする。
+# 他画面から画面切替を行いたい場合はここへ希望する画面を予約し、次の
+# 実行の冒頭（render_view_switchがst.radioを描画する前）で反映する
+# （sender_profiles_ui.py の _PENDING_SELECTED_ID と同じ考え方）。
+PENDING_VIEW = "cand_pending_view"
 SHOW_ARCHIVED = "cand_show_archived"  # 一覧でアーカイブ済みも表示するか
 
 # 管理者ビュー（フェーズ3D）の絞り込み・ページ状態
@@ -32,11 +38,13 @@ ADMIN_SHOW_ARCHIVED = "cand_admin_show_archived"
 ADMIN_PAGE = "cand_admin_page"
 
 VIEW_SEARCH = "search"
+VIEW_DISCOVER = "discover"
 VIEW_LIST = "list"
 VIEW_ADMIN = "admin"
 
 _VIEW_LABELS = {
     VIEW_SEARCH: "🔍 商品をリサーチ",
+    VIEW_DISCOVER: "🔎 商品を探す",
     VIEW_LIST: "⭐ マイ候補リスト",
     VIEW_ADMIN: "🛡️ 管理者ビュー",
 }
@@ -164,12 +172,15 @@ def render_view_switch(client) -> None:
     is_admin() を確認するため、ここでの判定はあくまで表示の下見。
     """
     init_state(st.session_state)
+    if PENDING_VIEW in st.session_state:
+        st.session_state[VIEW] = st.session_state.pop(PENDING_VIEW)
 
     is_admin_now = False
     if _set_session_for_admin_check(client):
         is_admin_now = candidates.is_admin(client)
 
-    options = (VIEW_SEARCH, VIEW_LIST, VIEW_ADMIN) if is_admin_now else (VIEW_SEARCH, VIEW_LIST)
+    options = ((VIEW_SEARCH, VIEW_DISCOVER, VIEW_LIST, VIEW_ADMIN) if is_admin_now
+              else (VIEW_SEARCH, VIEW_DISCOVER, VIEW_LIST))
     if st.session_state.get(VIEW, VIEW_SEARCH) not in options:
         st.session_state[VIEW] = VIEW_SEARCH
 

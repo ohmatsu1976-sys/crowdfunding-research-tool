@@ -955,7 +955,7 @@ def test_non_admin_does_not_see_admin_view_option():
         supabase_module.create_client = original
 
     assert not at.exception, str(at.exception)
-    assert list(at.radio[0].options) == ["🔍 商品をリサーチ", "⭐ マイ候補リスト"]
+    assert list(at.radio[0].options) == ["🔍 商品をリサーチ", "🔎 商品を探す", "⭐ マイ候補リスト"]
     assert "管理者ビュー" not in _text(at)
 
 
@@ -972,7 +972,7 @@ def test_admin_sees_three_view_options():
 
     assert not at.exception, str(at.exception)
     assert list(at.radio[0].options) == \
-        ["🔍 商品をリサーチ", "⭐ マイ候補リスト", "🛡️ 管理者ビュー"]
+        ["🔍 商品をリサーチ", "🔎 商品を探す", "⭐ マイ候補リスト", "🛡️ 管理者ビュー"]
 
 
 def test_admin_initial_view_is_still_search():
@@ -1456,7 +1456,7 @@ def test_admin_role_unaffected_by_summit_feature():
     at = at.run()
     assert not at.exception, str(at.exception)
     assert "Step 1" in _text(at)
-    assert list(at.radio[0].options) == ["🔍 商品をリサーチ", "⭐ マイ候補リスト"], (
+    assert list(at.radio[0].options) == ["🔍 商品をリサーチ", "🔎 商品を探す", "⭐ マイ候補リスト"], (
         "role='admin'というuser_metadataの値だけで管理者ビューが増えてはいけない"
     )
 
