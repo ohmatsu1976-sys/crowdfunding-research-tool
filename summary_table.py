@@ -7,6 +7,8 @@ st.dataframe は長文セルを折り返せず「日本で売れそうな理由�
 import html
 from typing import Iterable, List
 
+import contact_info
+
 PRIORITY_ORDER = {"A": 0, "B": 1, "C": 2}
 PRIORITY_BADGE = {"A": "🟢", "B": "🟡", "C": "🔴"}
 
@@ -70,6 +72,34 @@ def _sort_key(row: dict):
     return (PRIORITY_ORDER.get(priority, 9), str(row.get("商品名", "")))
 
 
+def _contact_cell_html(row: dict) -> str:
+    """「アプローチ先」セルのHTMLを組み立てる
+
+    メール・問い合わせフォームは検証済みの値だけを表示する（contact_info.resolve）。
+    mailto: はメール送信の唯一の手段にしない（端末にメールソフトが無いと
+    空白画面になるため）。どちらも取得できない場合のみ、従来からの
+    フォールバック（SNS・公式サイト・掲載ページ）を使う。
+    """
+    contact = contact_info.resolve(row)
+    email = contact["email"]
+    form_url = contact["form_url"]
+
+    parts: List[str] = []
+    if email:
+        mail_link = _link("mailto:" + email, "📧 メールを作成")
+        parts.append(f'<div>📧 <code>{_esc(email)}</code></div><div>{mail_link}</div>')
+    if form_url:
+        parts.append(_link(form_url, "🌐 問い合わせフォーム"))
+    if parts:
+        return "".join(parts)
+
+    fallback_url = str(row.get("アプローチ先リンク", "") or "")
+    fallback_label = row.get("種別", "")
+    if fallback_url:
+        return _link(fallback_url, fallback_label)
+    return "連絡先未取得"
+
+
 def build_summary_html(rows: Iterable[dict]) -> str:
     """サマリー表のHTMLを返す（rows は 1商品 = 1辞書）"""
     body: List[str] = []
@@ -84,8 +114,7 @@ def build_summary_html(rows: Iterable[dict]) -> str:
         amount_txt = f"¥{amount:,}" if amount else "—"
 
         name_html = _link(row.get("掲載URL", ""), row.get("商品名", ""))
-        contact_url = row.get("アプローチ先リンク", "")
-        contact_html = _link(contact_url, row.get("種別", "")) if contact_url else "—"
+        contact_html = _contact_cell_html(row)
 
         # 判定材料が不足している行は、判定が揺れうることを明示する
         low_conf = str(row.get("判定の確度", "")).startswith("参考値")

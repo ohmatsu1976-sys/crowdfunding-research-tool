@@ -298,15 +298,17 @@ def _sample_rows():
         {"優先度": "B", "判定の確度": "データ取得済み", "商品名": "B商品", "メーカー名": "M",
          "プラットフォーム": "KS", "調達額(円)": 77814600, "日本で売れそうな理由": "理由B",
          "掲載URL": "https://example.com", "種別": "🌐 公式サイト",
-         "アプローチ先リンク": "https://example.com"},
+         "アプローチ先リンク": "https://example.com",
+         "メールアドレス": "未確認", "問い合わせフォームURL": "未確認"},
         {"優先度": "C", "判定の確度": "データ取得済み", "商品名": "C商品", "メーカー名": "不明",
          "プラットフォーム": "IGG", "調達額(円)": 0, "日本で売れそうな理由": "理由C",
-         "掲載URL": "", "種別": "—", "アプローチ先リンク": ""},
+         "掲載URL": "", "種別": "—", "アプローチ先リンク": "",
+         "メールアドレス": "未確認", "問い合わせフォームURL": "未確認"},
         {"優先度": "A", "判定の確度": "参考値（データ不足）",
          "商品名": '<script>x</script>&"q"', "メーカー名": "M", "プラットフォーム": "KS",
          "調達額(円)": 0, "日本で売れそうな理由": "あ" * 300,
-         "掲載URL": "https://example.com", "種別": "📧 メール",
-         "アプローチ先リンク": "mailto:a@b.com"},
+         "掲載URL": "https://example.com", "種別": "📧 メール", "アプローチ先リンク": "",
+         "メールアドレス": "a@b.com", "問い合わせフォームURL": "未確認"},
     ]
 
 
@@ -343,6 +345,26 @@ def test_summary_formats_amounts():
     body = _body(_sample_rows())
     assert "¥77,814,600" in body
     assert ">—<" in body
+
+
+def test_summary_shows_email_address_text_not_only_label():
+    """メールアドレスがある行は、ラベルだけでなくアドレス自体を表示する"""
+    body = _body(_sample_rows())
+    assert "a@b.com" in body, "メールアドレスの文字列が画面に出ていない"
+    assert "メールを作成" in body, "mailto起動リンクも併置されていない"
+    assert 'href="mailto:a@b.com"' in body
+
+
+def test_summary_no_contact_shows_unobtained_message():
+    """メール・フォーム・フォールバックのいずれも無い行は「連絡先未取得」になる"""
+    body = _body(_sample_rows())
+    assert "連絡先未取得" in body
+
+
+def test_summary_fallback_link_used_when_no_email_or_form():
+    """メール・フォームが無い行は、従来どおり公式サイト等のフォールバックへリンクする"""
+    body = _body(_sample_rows())
+    assert 'href="https://example.com"' in body and "公式サイト" in body
 
 
 if __name__ == "__main__":

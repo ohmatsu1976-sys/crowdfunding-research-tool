@@ -32,6 +32,7 @@ from research_crowdfunding import (
     get_contact_info,
 )
 from summary_table import build_summary_html
+import contact_info
 import auth
 import auth_ui
 import candidates_ui
@@ -603,11 +604,10 @@ if results:
     st.markdown("---")
 
     # サマリーテーブル（主要カラムのみ）
-    def best_contact_type(row):
-        if row["メールアドレス"] not in ("未確認", ""):
-            return "📧 メール"
-        if row["問い合わせフォームURL"] not in ("未確認", ""):
-            return "📝 フォーム"
+    # メール・問い合わせフォームの表示判定は summary_table.py 側（contact_info.resolve）
+    # が検証済みの値だけを使って行う。ここではそれ以外のフォールバック
+    # （SNS・公式サイト・掲載ページ）だけを用意する。
+    def fallback_contact_type(row):
         if row["LinkedIn"] not in ("未確認", ""):
             return "💼 LinkedIn"
         if row["Facebook"] not in ("未確認", ""):
@@ -626,11 +626,7 @@ if results:
                 return "📋 KSページ"
         return "—"
 
-    def best_contact_url(row):
-        if row["メールアドレス"] not in ("未確認", ""):
-            return "mailto:" + row["メールアドレス"]
-        if row["問い合わせフォームURL"] not in ("未確認", ""):
-            return row["問い合わせフォームURL"]
+    def fallback_contact_url(row):
         if row["LinkedIn"] not in ("未確認", ""):
             return row["LinkedIn"]
         if row["Facebook"] not in ("未確認", ""):
@@ -645,8 +641,10 @@ if results:
     # 正規化済みなので通常はすべて揃っている。想定外の欠落でページごと落とさないよう、
     # 列の選択は KeyError を投げない reindex で行う（原因は上の警告で明示する）
     summary_df = df.reindex(columns=rschema.DISPLAY_COLUMNS).copy()
-    summary_df["種別"] = df.apply(best_contact_type, axis=1)
-    summary_df["アプローチ先リンク"] = df.apply(best_contact_url, axis=1)
+    summary_df["メールアドレス"] = df.get("メールアドレス", "未確認")
+    summary_df["問い合わせフォームURL"] = df.get("問い合わせフォームURL", "未確認")
+    summary_df["種別"] = df.apply(fallback_contact_type, axis=1)
+    summary_df["アプローチ先リンク"] = df.apply(fallback_contact_url, axis=1)
 
     st.markdown("**サマリー（主要項目）**")
     st.caption(
@@ -690,7 +688,13 @@ if results:
             st.divider()
 
     # CSV ダウンロード
-    csv_bytes = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+    # Mailmeteor等のメール配信ツールで使えるよう、メールアドレス欄は
+    # 検証済みの通常のメールアドレス（例: contact@example.com）か空欄のみにする。
+    # mailto: 形式や「未確認」、問い合わせフォームURLが混在した値は出力しない
+    # （フォームURLは「問い合わせフォームURL」列に別途入っている）。
+    csv_df = df.copy()
+    csv_df["メールアドレス"] = csv_df["メールアドレス"].apply(contact_info.normalize_email)
+    csv_bytes = csv_df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
     # 現在時刻ではなく、表示中の結果を取得した日時をファイル名にする
     ts = sstate.timestamp_label(st.session_state)
     st.download_button(
