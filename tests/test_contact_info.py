@@ -165,8 +165,8 @@ def test_display_invalid_email_does_not_produce_clickable_link():
     assert "連絡先未取得" in body
 
 
-# ── resolve_priority（「アプローチ先」の優先順位: 1.メール 2.Facebook 3.問い合わせ
-#    フォーム 4.LinkedIn 5.Instagram 6.公式サイト 7.商品掲載ページ 8.連絡先未取得） ──
+# ── resolve_priority（「アプローチ先」の優先順位: 1.メール 2.Facebook 3.Instagram
+#    4.問い合わせフォーム 5.LinkedIn 6.公式サイト 7.商品掲載ページ 8.連絡先未取得） ──
 
 def test_priority_1_email_wins_over_everything():
     """1. メールがあれば、Facebook等が他にあってもメールを選ぶ"""
@@ -187,34 +187,34 @@ def test_priority_2_facebook_wins_over_form_and_below():
                        "url": "https://facebook.com/maker", "label": "📘 Facebook"}
 
 
-def test_priority_3_form_wins_over_linkedin_and_below():
-    """3. メール・Facebookが無く問い合わせフォームがあれば、LinkedInより優先する"""
+def test_priority_3_instagram_wins_over_form_and_below():
+    """3. メール・Facebookが無くInstagramがあれば、問い合わせフォームより優先する"""
     row = {"メールアドレス": "未確認", "問い合わせフォームURL": "https://example.com/contact",
            "Facebook": "未確認", "LinkedIn": "https://linkedin.com/in/maker",
            "Instagram": "https://instagram.com/maker", "公式サイトURL": "https://example.com"}
+    result = contact_info.resolve_priority(row)
+    assert result == {"kind": "instagram", "email": "",
+                       "url": "https://instagram.com/maker", "label": "📷 Instagram"}
+
+
+def test_priority_4_form_wins_over_linkedin_and_below():
+    """4. メール・Facebook・Instagramが無く問い合わせフォームがあれば、LinkedInより優先する"""
+    row = {"メールアドレス": "未確認", "問い合わせフォームURL": "https://example.com/contact",
+           "Facebook": "未確認", "LinkedIn": "https://linkedin.com/in/maker",
+           "Instagram": "未確認", "公式サイトURL": "https://example.com"}
     result = contact_info.resolve_priority(row)
     assert result == {"kind": "form", "email": "",
                        "url": "https://example.com/contact", "label": "🌐 問い合わせフォーム"}
 
 
-def test_priority_4_linkedin_wins_over_instagram_and_below():
-    """4. メール・Facebook・フォームが無くLinkedInがあれば、Instagramより優先する"""
+def test_priority_5_linkedin_wins_over_official_site_and_below():
+    """5. メール・Facebook・Instagram・フォームが無くLinkedInがあれば、公式サイトより優先する"""
     row = {"メールアドレス": "未確認", "問い合わせフォームURL": "未確認",
            "Facebook": "未確認", "LinkedIn": "https://linkedin.com/in/maker",
-           "Instagram": "https://instagram.com/maker", "公式サイトURL": "https://example.com"}
+           "Instagram": "未確認", "公式サイトURL": "https://example.com"}
     result = contact_info.resolve_priority(row)
     assert result == {"kind": "linkedin", "email": "",
                        "url": "https://linkedin.com/in/maker", "label": "💼 LinkedIn"}
-
-
-def test_priority_5_instagram_wins_over_official_site_and_below():
-    """5. メール・Facebook・フォーム・LinkedInが無くInstagramがあれば、公式サイトより優先する"""
-    row = {"メールアドレス": "未確認", "問い合わせフォームURL": "未確認",
-           "Facebook": "未確認", "LinkedIn": "未確認",
-           "Instagram": "https://instagram.com/maker", "公式サイトURL": "https://example.com"}
-    result = contact_info.resolve_priority(row)
-    assert result == {"kind": "instagram", "email": "",
-                       "url": "https://instagram.com/maker", "label": "📷 Instagram"}
 
 
 def test_priority_6_official_site_wins_over_listing_page():
@@ -274,6 +274,15 @@ def test_display_facebook_link_used_when_no_email():
                  "Facebook": "https://facebook.com/maker"})
     assert 'href="https://facebook.com/maker"' in body
     assert "Facebook" in body
+    assert "問い合わせフォーム" not in body
+
+
+def test_display_instagram_link_used_when_no_email_or_facebook():
+    """メール・Facebookが無く Instagram がある場合、問い合わせフォームより Instagram を表示する"""
+    body = _cell({"メールアドレス": "未確認", "問い合わせフォームURL": "https://example.com/contact",
+                 "Facebook": "未確認", "Instagram": "https://instagram.com/maker"})
+    assert 'href="https://instagram.com/maker"' in body
+    assert "Instagram" in body
     assert "問い合わせフォーム" not in body
 
 

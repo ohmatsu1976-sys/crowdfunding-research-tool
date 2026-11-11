@@ -76,7 +76,7 @@ def _contact_cell_html(row: dict) -> str:
     """「アプローチ先」セルのHTMLを組み立てる
 
     優先順位（contact_info.resolve_priority）どおりに1つだけ選んで表示する:
-    1.メール 2.Facebook 3.問い合わせフォーム 4.LinkedIn 5.Instagram
+    1.メール 2.Facebook 3.Instagram 4.問い合わせフォーム 5.LinkedIn
     6.公式サイト 7.商品掲載ページ 8.連絡先未取得。
     メールは mailto: を唯一の手段にせず、アドレス自体も表示してコピーできるようにする
     （端末にメールソフトが無いと mailto: リンクだけでは空白画面になるため）。

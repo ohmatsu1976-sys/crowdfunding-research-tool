@@ -70,8 +70,8 @@ def _listing_label(row: Dict) -> str:
 def resolve_priority(row: Dict) -> Dict[str, str]:
     """「アプローチ先」として使う連絡先を優先順位どおりに1つ選ぶ
 
-    優先順位: 1.メール 2.Facebook 3.問い合わせフォーム 4.LinkedIn
-    5.Instagram 6.公式サイト 7.商品掲載ページ 8.連絡先未取得。
+    優先順位: 1.メール 2.Facebook 3.Instagram 4.問い合わせフォーム 5.LinkedIn
+    6.公式サイト 7.商品掲載ページ 8.連絡先未取得。
     空文字・不正なURL・不正なメールアドレスは候補に含めない
     （normalize_email / normalize_contact_url の検証をそのまま使う）。
     """
@@ -83,6 +83,10 @@ def resolve_priority(row: Dict) -> Dict[str, str]:
     if facebook:
         return {"kind": "facebook", "email": "", "url": facebook, "label": "📘 Facebook"}
 
+    instagram = normalize_contact_url(row.get("Instagram", ""))
+    if instagram:
+        return {"kind": "instagram", "email": "", "url": instagram, "label": "📷 Instagram"}
+
     form_url = normalize_contact_url(row.get("問い合わせフォームURL", ""))
     if form_url:
         return {"kind": "form", "email": "", "url": form_url, "label": "🌐 問い合わせフォーム"}
@@ -90,10 +94,6 @@ def resolve_priority(row: Dict) -> Dict[str, str]:
     linkedin = normalize_contact_url(row.get("LinkedIn", ""))
     if linkedin:
         return {"kind": "linkedin", "email": "", "url": linkedin, "label": "💼 LinkedIn"}
-
-    instagram = normalize_contact_url(row.get("Instagram", ""))
-    if instagram:
-        return {"kind": "instagram", "email": "", "url": instagram, "label": "📷 Instagram"}
 
     official = normalize_contact_url(row.get("公式サイトURL", ""))
     if official:
