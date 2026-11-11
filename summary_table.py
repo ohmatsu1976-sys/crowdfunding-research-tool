@@ -75,28 +75,18 @@ def _sort_key(row: dict):
 def _contact_cell_html(row: dict) -> str:
     """「アプローチ先」セルのHTMLを組み立てる
 
-    メール・問い合わせフォームは検証済みの値だけを表示する（contact_info.resolve）。
-    mailto: はメール送信の唯一の手段にしない（端末にメールソフトが無いと
-    空白画面になるため）。どちらも取得できない場合のみ、従来からの
-    フォールバック（SNS・公式サイト・掲載ページ）を使う。
+    優先順位（contact_info.resolve_priority）どおりに1つだけ選んで表示する:
+    1.メール 2.Facebook 3.問い合わせフォーム 4.LinkedIn 5.Instagram
+    6.公式サイト 7.商品掲載ページ 8.連絡先未取得。
+    メールは mailto: を唯一の手段にせず、アドレス自体も表示してコピーできるようにする
+    （端末にメールソフトが無いと mailto: リンクだけでは空白画面になるため）。
     """
-    contact = contact_info.resolve(row)
-    email = contact["email"]
-    form_url = contact["form_url"]
-
-    parts: List[str] = []
-    if email:
-        mail_link = _link("mailto:" + email, "📧 メールを作成")
-        parts.append(f'<div>📧 <code>{_esc(email)}</code></div><div>{mail_link}</div>')
-    if form_url:
-        parts.append(_link(form_url, "🌐 問い合わせフォーム"))
-    if parts:
-        return "".join(parts)
-
-    fallback_url = str(row.get("アプローチ先リンク", "") or "")
-    fallback_label = row.get("種別", "")
-    if fallback_url:
-        return _link(fallback_url, fallback_label)
+    choice = contact_info.resolve_priority(row)
+    if choice["kind"] == "email":
+        mail_link = _link("mailto:" + choice["email"], "📧 メールを作成")
+        return f'<div>📧 <code>{_esc(choice["email"])}</code></div><div>{mail_link}</div>'
+    if choice["kind"] != "none":
+        return _link(choice["url"], choice["label"])
     return "連絡先未取得"
 
 

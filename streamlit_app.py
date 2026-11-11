@@ -604,47 +604,16 @@ if results:
     st.markdown("---")
 
     # サマリーテーブル（主要カラムのみ）
-    # メール・問い合わせフォームの表示判定は summary_table.py 側（contact_info.resolve）
-    # が検証済みの値だけを使って行う。ここではそれ以外のフォールバック
-    # （SNS・公式サイト・掲載ページ）だけを用意する。
-    def fallback_contact_type(row):
-        if row["LinkedIn"] not in ("未確認", ""):
-            return "💼 LinkedIn"
-        if row["Facebook"] not in ("未確認", ""):
-            return "📘 Facebook"
-        if row["Instagram"] not in ("未確認", ""):
-            return "📷 Instagram"
-        if row["公式サイトURL"] not in ("", "未確認"):
-            return "🌐 公式サイト"
-        if row["掲載URL"] not in ("", "未確認"):
-            plat = row.get("プラットフォーム", "")
-            if plat == "Indiegogo":
-                return "📋 IGGページ"
-            elif plat == "ZECZEC":
-                return "📋 ZECZECページ"
-            else:
-                return "📋 KSページ"
-        return "—"
-
-    def fallback_contact_url(row):
-        if row["LinkedIn"] not in ("未確認", ""):
-            return row["LinkedIn"]
-        if row["Facebook"] not in ("未確認", ""):
-            return row["Facebook"]
-        if row["Instagram"] not in ("未確認", ""):
-            return row["Instagram"]
-        if row["公式サイトURL"] not in ("", "未確認"):
-            return row["公式サイトURL"]
-        # 最終フォールバック: プロジェクトページ（必ず存在する）
-        return row.get("掲載URL", "")
-
+    # 「アプローチ先」の優先順位（メール→Facebook→問い合わせフォーム→LinkedIn→
+    # Instagram→公式サイト→商品掲載ページ→連絡先未取得）は contact_info.resolve_priority
+    # に一本化しているため、ここでは summary_table.py が参照する生の列をそのまま渡すだけでよい。
+    #
     # 正規化済みなので通常はすべて揃っている。想定外の欠落でページごと落とさないよう、
     # 列の選択は KeyError を投げない reindex で行う（原因は上の警告で明示する）
     summary_df = df.reindex(columns=rschema.DISPLAY_COLUMNS).copy()
-    summary_df["メールアドレス"] = df.get("メールアドレス", "未確認")
-    summary_df["問い合わせフォームURL"] = df.get("問い合わせフォームURL", "未確認")
-    summary_df["種別"] = df.apply(fallback_contact_type, axis=1)
-    summary_df["アプローチ先リンク"] = df.apply(fallback_contact_url, axis=1)
+    for _col in ("メールアドレス", "問い合わせフォームURL", "Facebook", "LinkedIn",
+                 "Instagram", "公式サイトURL"):
+        summary_df[_col] = df.get(_col, "未確認")
 
     st.markdown("**サマリー（主要項目）**")
     st.caption(

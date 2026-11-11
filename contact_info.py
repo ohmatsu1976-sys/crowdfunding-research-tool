@@ -56,3 +56,51 @@ def resolve(row: Dict) -> Dict[str, str]:
         "email": normalize_email(row.get("メールアドレス", "")),
         "form_url": normalize_contact_url(row.get("問い合わせフォームURL", "")),
     }
+
+
+def _listing_label(row: Dict) -> str:
+    platform = str(row.get("プラットフォーム", "") or "")
+    if platform == "Indiegogo":
+        return "📋 IGGページ"
+    if platform == "ZECZEC":
+        return "📋 ZECZECページ"
+    return "📋 KSページ"
+
+
+def resolve_priority(row: Dict) -> Dict[str, str]:
+    """「アプローチ先」として使う連絡先を優先順位どおりに1つ選ぶ
+
+    優先順位: 1.メール 2.Facebook 3.問い合わせフォーム 4.LinkedIn
+    5.Instagram 6.公式サイト 7.商品掲載ページ 8.連絡先未取得。
+    空文字・不正なURL・不正なメールアドレスは候補に含めない
+    （normalize_email / normalize_contact_url の検証をそのまま使う）。
+    """
+    email = normalize_email(row.get("メールアドレス", ""))
+    if email:
+        return {"kind": "email", "email": email, "url": "", "label": ""}
+
+    facebook = normalize_contact_url(row.get("Facebook", ""))
+    if facebook:
+        return {"kind": "facebook", "email": "", "url": facebook, "label": "📘 Facebook"}
+
+    form_url = normalize_contact_url(row.get("問い合わせフォームURL", ""))
+    if form_url:
+        return {"kind": "form", "email": "", "url": form_url, "label": "🌐 問い合わせフォーム"}
+
+    linkedin = normalize_contact_url(row.get("LinkedIn", ""))
+    if linkedin:
+        return {"kind": "linkedin", "email": "", "url": linkedin, "label": "💼 LinkedIn"}
+
+    instagram = normalize_contact_url(row.get("Instagram", ""))
+    if instagram:
+        return {"kind": "instagram", "email": "", "url": instagram, "label": "📷 Instagram"}
+
+    official = normalize_contact_url(row.get("公式サイトURL", ""))
+    if official:
+        return {"kind": "official", "email": "", "url": official, "label": "🌐 公式サイト"}
+
+    listing = normalize_contact_url(row.get("掲載URL", ""))
+    if listing:
+        return {"kind": "listing", "email": "", "url": listing, "label": _listing_label(row)}
+
+    return {"kind": "none", "email": "", "url": "", "label": ""}
