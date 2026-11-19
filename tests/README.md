@@ -18,6 +18,7 @@ python tests/test_summit.py        # サミット特典モード（制限版画�
 python tests/test_sender_profiles.py # 送信者プロフィール（偽クライアント）
 python tests/test_cases_sql_migrations.py # 案件管理（0007〜0009）のSQL静的テスト
 python tests/test_cases.py         # 案件管理（第1段階「返信獲得」）のデータ層（偽クライアント）
+python tests/test_import_order.py  # 画面モジュール間のimport順序に依存しないこと（起動不能の再発防止）
 python tests/test_network.py       # 外部サイトへ実アクセスする
 ```
 
@@ -41,6 +42,7 @@ python tests/test_network.py       # 外部サイトへ実アクセスする
 | `test_sender_profiles.py` | なし（決定論的） | **コードの不具合**。必ず直す |
 | `test_cases_sql_migrations.py` | なし（決定論的・DB接続なし） | **SQLの不具合**。RLS・状態機械が実際に効くかはフェーズ3Eの実データテストで別途確認する |
 | `test_cases.py` | なし（決定論的） | **コードの不具合**。必ず直す |
+| `test_import_order.py` | なし（サブプロセスを起動するが外部通信はしない） | **起動不能になる不具合**。画面モジュール間で互いをimportする構造に戻していないか確認する |
 | `test_network.py` | 外部サイトの状態 | 掲載終了・仕様変更・IPブロックの可能性がある。コードの不具合とは限らないため、まず原因を切り分ける |
 
 `test_app_render.py` は Streamlit 同梱の `st.testing.v1.AppTest` を使う。
@@ -135,6 +137,16 @@ python tests/test_network.py       # 外部サイトへ実アクセスする
   出る操作（初回送信／フォローアップ／返信受信／こちらの返信／状態変更）が
   `log_case_event`RPCを正しい引数で呼ぶこと、取消し済みイベントが履歴に出ない
   こと、月間目標の保存、ログアウトでcase_状態が消えること
+
+- **画面モジュール間のimport順序**（`ui_state_keys.py`・`test_import_order.py`）：
+  `candidates_ui.py`（画面切替）と`cases_ui.py`（案件管理）は、共有する
+  session_stateキーを依存の無い`ui_state_keys.py`から読み、互いを一切
+  importしない（静的検査で確認）。`cases_ui`→`candidates_ui`・
+  `candidates_ui`→`cases_ui`のどちらの順でimportしても、またアプリ本体
+  （`streamlit_app.py`）をクリーンなPythonプロセスでimportしても
+  AttributeErrorが出ないことを、実際に新しいサブプロセスを起動して確認する
+  （同一プロセス内の2回目以降のimportはsys.modulesのキャッシュで
+  常に成功して見えるため、再発の検出には使えない）。
 
 ## 補足
 

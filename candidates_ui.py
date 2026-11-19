@@ -16,6 +16,14 @@ import streamlit as st
 import auth
 import candidates
 import cases
+# 画面切替・案件管理との受け渡しキーは、依存の無い共通モジュールが正本
+# （cases_ui.pyとの間でどちらかがどちらかをimportする構造にしない。
+#  以前はcases_ui.pyがここの属性をモジュール読み込み時に参照しており、
+#  初期化順序によってAttributeErrorになる不具合があった）。
+from ui_state_keys import (
+    CASES_FLASH_MESSAGE, PENDING_VIEW, SELECTED_CASE_ID,
+    VIEW_ADMIN, VIEW_CASES, VIEW_DASHBOARD, VIEW_DISCOVER, VIEW_LIST, VIEW_SEARCH,
+)
 
 # session_state キー（他機能と衝突しないよう cand_ で始める。
 # チェックボックス等の動的なウィジェットキーも "cand_" で始めており、
@@ -23,22 +31,7 @@ import cases
 SAVED_URLS = "cand_saved_urls"        # 今回のセッションで保存に成功したURL
 LAST_MESSAGE = "cand_last_message"    # 直近の操作結果メッセージ（表示後に消す）
 VIEW = "cand_view"                    # 画面切替（商品をリサーチ／マイ候補リスト／管理者ビュー）
-# st.radio(key=VIEW)が描画された後（同じ実行内）にVIEWへ直接代入すると、
-# Streamlitが「instantiated後のウィジェットキー変更」として例外にする。
-# 他画面から画面切替を行いたい場合はここへ希望する画面を予約し、次の
-# 実行の冒頭（render_view_switchがst.radioを描画する前）で反映する
-# （sender_profiles_ui.py の _PENDING_SELECTED_ID と同じ考え方）。
-PENDING_VIEW = "cand_pending_view"
 SHOW_ARCHIVED = "cand_show_archived"  # 一覧でアーカイブ済みも表示するか
-
-# 商品案件管理（第1段階「返信獲得」）画面へ渡す、直近で作成/選択した案件のid、
-# および画面遷移後に案件一覧/詳細側で表示するメッセージ。
-# "case_" 接頭辞にしているのは cases_ui.clear_state() がこの接頭辞で
-# まとめて消すため。cases_ui.py はこの2つの値をそのまま自分のLAST_MESSAGE/
-# 選択中の案件idとして使う（import循環を避けるため、値自体はここ
-# （画面切替を持つ側）で定義し、cases_ui側から参照する）。
-SELECTED_CASE_ID = "case_selected_id"
-CASES_FLASH_MESSAGE = "case_last_message"
 
 # 管理者ビュー（フェーズ3D）の絞り込み・ページ状態
 ADMIN_FILTER_USER = "cand_admin_filter_user"
@@ -46,13 +39,6 @@ ADMIN_FILTER_STATUS = "cand_admin_filter_status"
 ADMIN_FILTER_PRIORITY = "cand_admin_filter_priority"
 ADMIN_SHOW_ARCHIVED = "cand_admin_show_archived"
 ADMIN_PAGE = "cand_admin_page"
-
-VIEW_DASHBOARD = "dashboard"
-VIEW_SEARCH = "search"
-VIEW_DISCOVER = "discover"
-VIEW_LIST = "list"
-VIEW_CASES = "cases"
-VIEW_ADMIN = "admin"
 
 _VIEW_LABELS = {
     VIEW_DASHBOARD: "🏠 ダッシュボード",

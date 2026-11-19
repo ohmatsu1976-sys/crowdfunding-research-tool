@@ -16,14 +16,19 @@ from datetime import date as _date
 import streamlit as st
 
 import auth
-import candidates_ui
 import cases
+# 画面切替・案件管理との受け渡しキーは、依存の無い共通モジュールが正本
+# （candidates_ui.pyを直接importしない。以前はここでcandidates_ui.pyの
+#  属性をモジュール読み込み時に参照しており、初期化順序によって
+#  AttributeErrorになる不具合があった。再発防止のため、画面切替の親である
+#  candidates_ui.py側も同じui_state_keys.pyから読む構成にしている）。
+import ui_state_keys as uikeys
 
 # session_state キー（他機能と衝突しないよう case_ で始める。
-# candidates_ui.SELECTED_CASE_ID も同じ接頭辞のため、clear_state() で一括消去される）
-# LAST_MESSAGEはcandidates_ui.CASES_FLASH_MESSAGEと同じ値にする（マイ候補リスト
+# uikeys.SELECTED_CASE_ID も同じ接頭辞のため、clear_state() で一括消去される）
+# LAST_MESSAGEはuikeys.CASES_FLASH_MESSAGEと同じ値にする（マイ候補リスト
 # 画面の「商品案件を作成」ボタンから、遷移先のこの画面へメッセージを渡すため）。
-LAST_MESSAGE = candidates_ui.CASES_FLASH_MESSAGE
+LAST_MESSAGE = uikeys.CASES_FLASH_MESSAGE
 SHOW_ARCHIVED = "case_show_archived"   # 案件一覧でアーカイブ済みも表示するか
 STATUS_FILTER = "case_status_filter"   # 案件一覧のステータス絞り込み
 
@@ -74,8 +79,8 @@ def _open_case(case_id: str) -> None:
     Streamlitが例外にする。PENDING_VIEW経由で次回実行の冒頭に反映する
     （candidates_ui.render_view_switchがstop()より前に処理する）。
     """
-    st.session_state[candidates_ui.PENDING_VIEW] = candidates_ui.VIEW_CASES
-    st.session_state[candidates_ui.SELECTED_CASE_ID] = case_id
+    st.session_state[uikeys.PENDING_VIEW] = uikeys.VIEW_CASES
+    st.session_state[uikeys.SELECTED_CASE_ID] = case_id
 
 
 # =============================================================================
@@ -166,12 +171,12 @@ def render_cases_screen(client) -> None:
         st.rerun()
 
     user_id = st.session_state.get(auth.USER_ID, "")
-    selected_id = st.session_state.get(candidates_ui.SELECTED_CASE_ID, "")
+    selected_id = st.session_state.get(uikeys.SELECTED_CASE_ID, "")
 
     if selected_id:
         case = cases.get_case(client, user_id, selected_id)
         if case is None:
-            st.session_state[candidates_ui.SELECTED_CASE_ID] = ""
+            st.session_state[uikeys.SELECTED_CASE_ID] = ""
             _flash("指定の案件が見つかりませんでした。")
             st.rerun()
         _render_detail(client, user_id, case)
@@ -219,7 +224,7 @@ def _render_list(client, user_id: str) -> None:
                 st.caption(detail)
             with col_btn:
                 if st.button("詳細を見る", key=f"case_open_{c.id}", width="stretch"):
-                    st.session_state[candidates_ui.SELECTED_CASE_ID] = c.id
+                    st.session_state[uikeys.SELECTED_CASE_ID] = c.id
                     st.rerun()
 
 
@@ -230,7 +235,7 @@ def _recipient_default(case: cases.Case) -> str:
 
 def _render_detail(client, user_id: str, case: cases.Case) -> None:
     if st.button("← 案件一覧に戻る"):
-        st.session_state[candidates_ui.SELECTED_CASE_ID] = ""
+        st.session_state[uikeys.SELECTED_CASE_ID] = ""
         st.rerun()
 
     badge = _STATUS_BADGE.get(case.status, "")
