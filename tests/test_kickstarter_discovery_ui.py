@@ -39,6 +39,14 @@ def _app(logged_in=True, role=None) -> AppTest:
         at.session_state[auth.MUST_CHANGE] = False
         if role is not None:
             at.session_state[auth.ROLE] = role
+        # 通常版の既定画面はダッシュボード（案件管理）だが、ダッシュボードは
+        # 実クライアントへ auth.apply_session() を試みるため、ダミーの
+        # トークンのままだと（このファイルは「商品を探す」画面の確認が目的で
+        # 案件管理のクライアントを偽装していないため）セッション切れ扱いに
+        # なってしまう。この画面には無関係なので、従来どおり商品リサーチ
+        # 画面から始まるようにする（_goto_discoverが明示的に切り替える）。
+        if role is None:
+            at.session_state[candidates_ui.VIEW] = candidates_ui.VIEW_SEARCH
     return at
 
 

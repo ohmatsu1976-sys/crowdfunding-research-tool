@@ -321,6 +321,105 @@ def test_get_case_returns_none_for_other_users_case():
     assert cases.get_case(client, "user-1", "a") is not None
 
 
+# =============================================================================
+# resolve_contact_display（cases_ui.py が使う、連絡先候補の表示用情報）
+# =============================================================================
+
+def test_resolve_contact_display_prefers_email_and_returns_full_info():
+    info = cases.resolve_contact_display(
+        {"email": "maker@example.com", "facebook": "https://facebook.com/x"},
+        source_url="https://www.kickstarter.com/projects/a/b", platform="Kickstarter")
+    assert info["kind"] == "email"
+    assert info["email"] == "maker@example.com"
+
+
+def test_resolve_contact_display_falls_back_to_listing_url():
+    info = cases.resolve_contact_display({}, source_url="https://www.indiegogo.com/projects/x",
+                                         platform="Indiegogo")
+    assert info["kind"] == "listing"
+    assert info["url"] == "https://www.indiegogo.com/projects/x"
+
+
+def test_resolve_contact_display_matches_resolve_primary_channel():
+    """resolve_primary_channel()と同じ優先順位ロジックを再利用している（二重実装しない）"""
+    snapshot = {"facebook": "https://facebook.com/x", "linkedin": "https://linkedin.com/y"}
+    kind_only = cases.resolve_primary_channel(snapshot, "https://example.com", "Kickstarter")
+    full = cases.resolve_contact_display(snapshot, "https://example.com", "Kickstarter")
+    assert full["kind"] == kind_only
+
+
+# =============================================================================
+# update_case（memo/next_action_at/next_action_label/archived/primary_channel
+# の直接更新。sql/migrations/0009_cases_rls_grants.sqlのGRANT UPDATEと同じ5列）
+# =============================================================================
+
+def test_update_case_rejects_empty_ids_without_calling_db():
+    client = _FakeClient()
+    assert cases.update_case(client, "", "case-1", memo="x") is False
+    assert cases.update_case(client, "user-1", "", memo="x") is False
+    assert not client.calls
+
+
+def test_update_case_updates_memo_only():
+    client = _FakeClient(tables={"cases": [_case_row(id="a", user_id="user-1", memo="old")]})
+    ok = cases.update_case(client, "user-1", "a", memo="new memo")
+    assert ok is True
+    updates = [c for c in client.calls if c["kind"] == "update"]
+    assert updates and updates[0]["payload"] == {"memo": "new memo"}
+    assert client.tables["cases"][0]["memo"] == "new memo"
+
+
+def test_update_case_never_touches_status_or_other_state_machine_columns():
+    """statusやhas_reply等はここから絶対に送らない（状態変更は必ずlog_eventのRPCを通す）"""
+    client = _FakeClient(tables={"cases": [_case_row(id="a", user_id="user-1")]})
+    cases.update_case(client, "user-1", "a", memo="x", archived=True)
+    updates = [c for c in client.calls if c["kind"] == "update"]
+    sent_columns = set(updates[0]["payload"].keys())
+    assert sent_columns <= {"memo", "next_action_at", "next_action_label",
+                            "archived", "primary_channel"}
+    assert "status" not in sent_columns and "has_reply" not in sent_columns
+
+
+def test_update_case_can_set_next_action_at_from_plain_date():
+    client = _FakeClient(tables={"cases": [_case_row(id="a", user_id="user-1")]})
+    ok = cases.update_case(client, "user-1", "a", next_action_at=date(2026, 12, 1),
+                           next_action_label="次回確認予定")
+    assert ok is True
+    assert client.tables["cases"][0]["next_action_at"] == "2026-12-01"
+    assert client.tables["cases"][0]["next_action_label"] == "次回確認予定"
+
+
+def test_update_case_can_clear_next_action_at_with_none():
+    client = _FakeClient(tables={"cases": [
+        _case_row(id="a", user_id="user-1", next_action_at="2026-12-01",
+                  next_action_label="次回確認予定")]})
+    ok = cases.update_case(client, "user-1", "a", next_action_at=None, next_action_label="")
+    assert ok is True
+    assert client.tables["cases"][0]["next_action_at"] is None
+    assert client.tables["cases"][0]["next_action_label"] == ""
+
+
+def test_update_case_rejects_unknown_primary_channel_without_calling_db():
+    client = _FakeClient(tables={"cases": [_case_row(id="a", user_id="user-1")]})
+    ok = cases.update_case(client, "user-1", "a", primary_channel="not-a-real-channel")
+    assert ok is False
+    assert not any(c["kind"] == "update" for c in client.calls)
+
+
+def test_update_case_with_no_fields_is_a_safe_no_op():
+    client = _FakeClient(tables={"cases": [_case_row(id="a", user_id="user-1")]})
+    ok = cases.update_case(client, "user-1", "a")
+    assert ok is True
+    assert not client.calls
+
+
+def test_update_case_scopes_by_both_id_and_user_id():
+    client = _FakeClient(tables={"cases": [_case_row(id="a", user_id="user-1", memo="old")]})
+    cases.update_case(client, "user-1", "a", memo="new")
+    updates = [c for c in client.calls if c["kind"] == "update"]
+    assert updates[0]["filters"] == {"id": "a", "user_id": "user-1"}
+
+
 def test_list_case_events_can_exclude_voided():
     client = _FakeClient(tables={"case_events": [
         {"id": "e1", "case_id": "c1", "user_id": "u1", "kind": "initial",

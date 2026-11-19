@@ -33,8 +33,16 @@ FAKE_SECRETS = {"SUPABASE_URL": "https://example.supabase.co",
                 "SUPABASE_PUBLISHABLE_KEY": "sb_publishable_dummy-not-a-real-key"}
 
 
-def _app(with_secrets=True, logged_in=True, must_change=False) -> AppTest:
-    """アプリを用意する（既定はログイン済み・パスワード変更済み）"""
+def _app(with_secrets=True, logged_in=True, must_change=False,
+        view=candidates_ui.VIEW_SEARCH) -> AppTest:
+    """アプリを用意する（既定はログイン済み・パスワード変更済み）
+
+    通常版の既定画面はダッシュボード（candidates_ui.VIEW_DASHBOARD）だが、
+    このヘルパーを使う既存テストの大半は商品リサーチ画面の挙動を検証するもの
+    なので、view引数の既定値をVIEW_SEARCHに固定し、従来どおり検索画面から
+    始まるようにする。ダッシュボードが実際に既定画面であることそのものを
+    検証するテストは view=None を渡す（#「ダッシュボード（通常版の既定画面）」節）。
+    """
     at = AppTest.from_file(APP, default_timeout=TIMEOUT)
     if with_secrets:
         for name, value in FAKE_SECRETS.items():
@@ -45,6 +53,8 @@ def _app(with_secrets=True, logged_in=True, must_change=False) -> AppTest:
         at.session_state[auth.ACCESS_TOKEN] = "dummy-access"
         at.session_state[auth.REFRESH_TOKEN] = "dummy-refresh"
         at.session_state[auth.MUST_CHANGE] = must_change
+        if view is not None:
+            at.session_state[candidates_ui.VIEW] = view
     return at
 
 ROWS = [{col: "" for col in ()}]  # 後で本物の列を入れる
@@ -637,12 +647,24 @@ def test_logged_out_cannot_reach_candidate_list():
     assert "マイ候補リスト" not in _text(at)
 
 
-def test_default_view_after_login_is_search():
-    """ログイン直後は従来の商品リサーチ画面（マイ候補リストではない）"""
-    at = _app().run()
+def test_default_view_after_login_is_dashboard():
+    """ログイン直後は通常版の既定画面であるダッシュボード（商品リサーチではない）
+
+    _FakeCasesClient は本ファイル下部の
+    「商品案件管理（第1段階「返信獲得」）のUI」節で定義している
+    （このテスト関数の定義時点では未定義だが、実行時には定義済みになる）。
+    """
+    fake = _FakeCasesClient()
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=None).run()
+    finally:
+        supabase_module.create_client = original
     assert not at.exception, str(at.exception)
-    assert at.session_state[candidates_ui.VIEW] == candidates_ui.VIEW_SEARCH
-    assert "Step 1" in _text(at)
+    assert at.session_state[candidates_ui.VIEW] == candidates_ui.VIEW_DASHBOARD
+    assert "ダッシュボード" in _text(at)
+    assert "Step 1" not in _text(at)
 
 
 def test_sidebar_switches_to_candidate_list():
@@ -955,7 +977,8 @@ def test_non_admin_does_not_see_admin_view_option():
         supabase_module.create_client = original
 
     assert not at.exception, str(at.exception)
-    assert list(at.radio[0].options) == ["🔍 商品をリサーチ", "🔎 商品を探す", "⭐ マイ候補リスト"]
+    assert list(at.radio[0].options) == [
+        "🏠 ダッシュボード", "🔍 商品をリサーチ", "🔎 商品を探す", "⭐ マイ候補リスト", "📋 案件一覧"]
     assert "管理者ビュー" not in _text(at)
 
 
@@ -971,24 +994,25 @@ def test_admin_sees_three_view_options():
         supabase_module.create_client = original
 
     assert not at.exception, str(at.exception)
-    assert list(at.radio[0].options) == \
-        ["🔍 商品をリサーチ", "🔎 商品を探す", "⭐ マイ候補リスト", "🛡️ 管理者ビュー"]
+    assert list(at.radio[0].options) == [
+        "🏠 ダッシュボード", "🔍 商品をリサーチ", "🔎 商品を探す", "⭐ マイ候補リスト",
+        "📋 案件一覧", "🛡️ 管理者ビュー"]
 
 
-def test_admin_initial_view_is_still_search():
-    """管理者であっても、ログイン直後の初期画面は商品リサーチのまま"""
+def test_admin_initial_view_is_still_dashboard():
+    """管理者であっても、ログイン直後の初期画面は一般利用者と同じダッシュボード"""
     saved_items, products, profiles = _admin_fixture()
     fake = _FakeAdminAppClient(saved_items, products, profiles, is_admin=True)
     original = supabase_module.create_client
     supabase_module.create_client = lambda url, key: fake
     try:
-        at = _app().run()
+        at = _app(view=None).run()
     finally:
         supabase_module.create_client = original
 
     assert not at.exception, str(at.exception)
-    assert at.session_state[candidates_ui.VIEW] == candidates_ui.VIEW_SEARCH
-    assert "Step 1" in _text(at)
+    assert at.session_state[candidates_ui.VIEW] == candidates_ui.VIEW_DASHBOARD
+    assert "ダッシュボード" in _text(at)
 
 
 def test_admin_view_shows_all_users_candidates():
@@ -1456,7 +1480,8 @@ def test_admin_role_unaffected_by_summit_feature():
     at = at.run()
     assert not at.exception, str(at.exception)
     assert "Step 1" in _text(at)
-    assert list(at.radio[0].options) == ["🔍 商品をリサーチ", "🔎 商品を探す", "⭐ マイ候補リスト"], (
+    assert list(at.radio[0].options) == [
+        "🏠 ダッシュボード", "🔍 商品をリサーチ", "🔎 商品を探す", "⭐ マイ候補リスト", "📋 案件一覧"], (
         "role='admin'というuser_metadataの値だけで管理者ビューが増えてはいけない"
     )
 
@@ -1943,6 +1968,570 @@ def test_streamlit_app_touches_last_used_on_run():
         "touch_last_usedの呼び出しが、実行ボタン押下の処理の中の、"
         "API呼び出しより前にない"
     )
+
+
+# ── 商品案件管理（第1段階「返信獲得」）のUI ──────────────────────────────────────
+#
+# ダッシュボード（通常版の既定画面）・案件一覧・案件詳細（基本表示）・
+# マイ候補リストからの「商品案件を作成」ボタン。AI返信アシスタント・
+# 訂正/伏せ字化/取消しの画面はこの実装では含まない（AI APIは一切呼ばない）。
+
+import cases  # noqa: E402
+import cases_ui  # noqa: E402
+
+
+class _FakeCasesResponse:
+    def __init__(self, data):
+        self.data = data
+
+
+class _FakeCasesQuery:
+    def __init__(self, store, table, kind, payload=None):
+        self._store = store
+        self._table = table
+        self._kind = kind
+        self._payload = payload
+        self._filters = {}
+        self._is_null = {}
+        self._order = None
+
+    def select(self, columns):
+        return self
+
+    def eq(self, column, value):
+        self._filters[column] = value
+        return self
+
+    def is_(self, column, value):
+        self._is_null[column] = value
+        return self
+
+    def order(self, column, desc=False):
+        self._order = (column, desc)
+        return self
+
+    def upsert(self, payload, on_conflict=None):
+        self._kind = "upsert"
+        self._payload = payload
+        self._on_conflict = on_conflict
+        return self
+
+    def _matches(self, row):
+        if not all(row.get(k) == v for k, v in self._filters.items()):
+            return False
+        for col, expected in self._is_null.items():
+            is_null = row.get(col) is None
+            if expected == "null" and not is_null:
+                return False
+        return True
+
+    def execute(self):
+        rows = self._store["tables"].setdefault(self._table, [])
+        matched = [r for r in rows if self._matches(r)]
+
+        if self._kind == "select":
+            if self._order:
+                col, desc = self._order
+                matched = sorted(matched, key=lambda r: r.get(col) or "", reverse=desc)
+            return _FakeCasesResponse([dict(r) for r in matched])
+
+        if self._kind == "update":
+            for row in matched:
+                row.update(self._payload or {})
+            return _FakeCasesResponse([dict(r) for r in matched])
+
+        if self._kind == "upsert":
+            key_cols = (self._on_conflict or "").split(",")
+            existing = next(
+                (r for r in rows if all(r.get(c) == self._payload.get(c) for c in key_cols)),
+                None)
+            if existing is not None:
+                existing.update(self._payload)
+            else:
+                rows.append(dict(self._payload))
+            return _FakeCasesResponse([dict(self._payload)])
+
+        raise AssertionError(f"未対応の操作: {self._kind}")
+
+
+class _FakeCasesTable:
+    def __init__(self, store, name):
+        self._store = store
+        self._name = name
+
+    def select(self, columns):
+        return _FakeCasesQuery(self._store, self._name, "select").select(columns)
+
+    def update(self, payload):
+        return _FakeCasesQuery(self._store, self._name, "update", payload)
+
+    def upsert(self, payload, on_conflict=None):
+        return _FakeCasesQuery(self._store, self._name, "upsert").upsert(payload, on_conflict)
+
+
+class _FakeCasesRpc:
+    def __init__(self, store, name, params):
+        self._store = store
+        self._name = name
+        self._params = params
+
+    def execute(self):
+        self._store["calls"].append((self._name, self._params))
+        if self._name == "is_admin":
+            return _FakeCasesResponse(False)
+        handler = self._store["rpc_handlers"].get(self._name)
+        if handler is None:
+            raise AssertionError(f"未設定のRPC呼び出し: {self._name}")
+        return handler(self._params)
+
+
+class _FakeCasesClient:
+    """ダッシュボード・案件一覧・案件詳細のテスト用の偽クライアント
+
+    cases/case_events/case_targets をインメモリで模す。is_admin() は常にfalseを返す
+    （候補リスト画面切替の下見でネットワークへ触れないようにするため）。
+    """
+
+    def __init__(self, cases=None, case_events=None, case_targets=None, rpc_handlers=None):
+        self._store = {
+            "tables": {
+                "cases": [dict(r) for r in (cases or [])],
+                "case_events": [dict(r) for r in (case_events or [])],
+                "case_targets": [dict(r) for r in (case_targets or [])],
+            },
+            "rpc_handlers": rpc_handlers or {},
+            "calls": [],
+        }
+        self.auth = _FakeCandAuth()
+
+    def table(self, name):
+        return _FakeCasesTable(self._store, name)
+
+    def rpc(self, name, params=None):
+        return _FakeCasesRpc(self._store, name, params)
+
+
+def _app_case_row(**overrides):
+    row = {
+        "id": "case-1", "user_id": "test-user", "product_id": "prod-1", "saved_item_id": "sid-1",
+        "platform": "Kickstarter", "product_name": "ダッシュボード確認商品",
+        "maker_name": "テストメーカー", "source_url": "https://www.kickstarter.com/projects/a/b",
+        "contact_snapshot": {"email": "maker@example.com"},
+        "phase": "reply", "status": cases.STATUS_NOT_CONTACTED, "primary_channel": "email",
+        "first_sent_at": None, "last_reply_at": None, "advanced_at": None, "has_reply": False,
+        "next_action_at": None, "next_action_label": "", "memo": "", "archived": False,
+        "created_at": "2026-11-01T00:00:00+00:00", "updated_at": "2026-11-01T00:00:00+00:00",
+    }
+    row.update(overrides)
+    return row
+
+
+# ── ダッシュボード（通常版の既定画面）────────────────────────────────────────────
+
+def test_dashboard_shows_empty_state_when_no_cases():
+    """案件が1件も無ければ、マイ候補リストからの作成を促す案内だけを出す"""
+    fake = _FakeCasesClient()
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=None).run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    assert "まだ商品案件がありません" in _text(at)
+
+
+def test_dashboard_shows_todays_todo_with_open_button():
+    """今日やることに、優先度の高い案件が表示され、詳細へ移動できる"""
+    row = _app_case_row(status=cases.STATUS_AWAITING_OUR_REPLY)
+    fake = _FakeCasesClient(cases=[row])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=None).run()
+        assert not at.exception, str(at.exception)
+        assert "ダッシュボード確認商品" in _text(at)
+        open_btn = [b for b in at.button if "この案件を開く" in b.label][0]
+        at = open_btn.click().run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    assert at.session_state[candidates_ui.VIEW] == candidates_ui.VIEW_CASES
+    assert at.session_state[candidates_ui.SELECTED_CASE_ID] == "case-1"
+    assert "メーカー: テストメーカー" in _text(at), "案件詳細（一覧ではない）が開いていない"
+    assert not any(b.label == "詳細を見る" for b in at.button), "一覧画面のまま"
+
+
+def test_dashboard_monthly_target_save_round_trip():
+    """月間目標を保存すると、次に開いたときにもその値が反映される"""
+    fake = _FakeCasesClient(cases=[_app_case_row()])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=None).run()
+        assert not at.exception, str(at.exception)
+        approach_input = at.number_input[0]
+        at = approach_input.set_value(20).run()
+        save_btn = [b for b in at.button if "目標を保存する" in b.label][0]
+        at = save_btn.click().run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    assert "今月の目標を保存しました" in _text(at)
+    saved = fake._store["tables"]["case_targets"]
+    assert len(saved) == 1 and saved[0]["approach_target"] == 20
+
+
+def test_dashboard_not_shown_in_summit_mode():
+    """サミット特典版には案件管理（ダッシュボード・案件一覧）を一切表示しない"""
+    at = _summit_app().run()
+    assert not at.exception, str(at.exception)
+    assert "ダッシュボード" not in _text(at)
+    assert "案件一覧" not in _text(at)
+    assert list(at.radio) == []
+
+
+# ── 案件一覧・案件詳細（基本表示）────────────────────────────────────────────────
+
+def test_cases_list_shows_case_and_opens_detail():
+    row = _app_case_row()
+    fake = _FakeCasesClient(cases=[row])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=candidates_ui.VIEW_CASES).run()
+        assert not at.exception, str(at.exception)
+        assert "ダッシュボード確認商品" in _text(at)
+        open_btn = [b for b in at.button if b.label == "詳細を見る"][0]
+        at = open_btn.click().run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    assert "メーカー: テストメーカー" in _text(at)
+    assert any("初回メッセージを送信した" in b.label for b in at.button)
+
+
+def test_case_detail_back_button_returns_to_list():
+    fake = _FakeCasesClient(cases=[_app_case_row()])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=candidates_ui.VIEW_CASES).run()
+        at.session_state[candidates_ui.SELECTED_CASE_ID] = "case-1"
+        at = at.run()
+        back_btn = [b for b in at.button if "案件一覧に戻る" in b.label][0]
+        at = back_btn.click().run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    assert at.session_state[candidates_ui.SELECTED_CASE_ID] == ""
+    assert "詳細を見る" in [b.label for b in at.button]
+
+
+def test_case_detail_initial_message_logs_event():
+    """初回メッセージの送信フォームを送ると、log_case_event RPCが正しい引数で呼ばれる"""
+    row = _app_case_row(status=cases.STATUS_NOT_CONTACTED)
+    fake = _FakeCasesClient(cases=[row])
+
+    def _handle_log_event(params):
+        return _FakeCasesResponse({"event_id": "ev-1", "status": "awaiting_first_reply",
+                                   "next_action_at": "2026-11-04", "next_action_label": "1回目フォロー"})
+    fake._store["rpc_handlers"]["log_case_event"] = _handle_log_event
+
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=candidates_ui.VIEW_CASES).run()
+        at.session_state[candidates_ui.SELECTED_CASE_ID] = "case-1"
+        at = at.run()
+        submit = [b for b in at.button if "初回メッセージを送信した" in b.label][0]
+        at = submit.click().run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    assert "記録しました" in _text(at)
+    rpc_calls = [c for c in fake._store["calls"] if c[0] == "log_case_event"]
+    assert len(rpc_calls) == 1
+    params = rpc_calls[0][1]
+    assert params["p_kind"] == "initial"
+    assert "user_id" not in params and "p_user_id" not in params
+
+
+def test_case_detail_awaiting_first_reply_shows_followup_and_reply_actions():
+    row = _app_case_row(status=cases.STATUS_AWAITING_FIRST_REPLY, next_action_label="1回目フォロー")
+    fake = _FakeCasesClient(cases=[row])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=candidates_ui.VIEW_CASES).run()
+        at.session_state[candidates_ui.SELECTED_CASE_ID] = "case-1"
+        at = at.run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    labels = [b.label for b in at.button]
+    assert any("1回目フォローアップを送った" in l for l in labels)
+    assert any("返信を受け取った" in l for l in labels)
+    assert not any("初回メッセージ" in l for l in labels)
+
+
+def test_case_detail_awaiting_next_reply_can_set_manual_reminder():
+    """次回確認予定日を設定すると、次回from以降の「今日やること」に乗る土台(next_action_at)が保存される"""
+    from datetime import date as _date
+    row = _app_case_row(status=cases.STATUS_AWAITING_NEXT_REPLY)
+    fake = _FakeCasesClient(cases=[row])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=candidates_ui.VIEW_CASES).run()
+        at.session_state[candidates_ui.SELECTED_CASE_ID] = "case-1"
+        at = at.run()
+        assert not at.exception, str(at.exception)
+        remind_input = at.date_input[0]
+        at = remind_input.set_value(_date(2026, 12, 1)).run()
+        set_btn = [b for b in at.button if b.label == "この日を設定する"][0]
+        at = set_btn.click().run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    assert "次回確認予定日を設定しました" in _text(at)
+    assert fake._store["tables"]["cases"][0]["next_action_at"] == "2026-12-01"
+
+
+def test_case_detail_advanced_status_shows_no_action_buttons():
+    row = _app_case_row(status=cases.STATUS_ADVANCED)
+    fake = _FakeCasesClient(cases=[row])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=candidates_ui.VIEW_CASES).run()
+        at.session_state[candidates_ui.SELECTED_CASE_ID] = "case-1"
+        at = at.run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    assert "商談へ進んだ案件です" in _text(at)
+
+
+def test_case_detail_lost_status_renders_without_error():
+    row = _app_case_row(status=cases.STATUS_LOST)
+    fake = _FakeCasesClient(cases=[row])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=candidates_ui.VIEW_CASES).run()
+        at.session_state[candidates_ui.SELECTED_CASE_ID] = "case-1"
+        at = at.run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    assert "状態変更はできません" in _text(at)
+
+
+def test_case_detail_shows_timeline_from_valid_events_only():
+    row = _app_case_row()
+    events = [
+        {"id": "ev-1", "case_id": "case-1", "user_id": "test-user", "kind": "initial",
+         "channel": "email", "recipient": "maker@example.com",
+         "occurred_at": "2026-11-01T00:00:00+00:00", "message_text": "Hello",
+         "translated_text": "", "ai_assist": None, "target_status": None,
+         "voided_at": None, "voided_reason": "", "superseded_by": None,
+         "redacted_at": None, "created_at": "2026-11-01T00:00:00+00:00"},
+        {"id": "ev-2", "case_id": "case-1", "user_id": "test-user", "kind": "followup1",
+         "channel": "", "recipient": "", "occurred_at": "2026-11-05T00:00:00+00:00",
+         "message_text": "", "translated_text": "", "ai_assist": None, "target_status": None,
+         "voided_at": "2026-11-06T00:00:00+00:00", "voided_reason": "mistake",
+         "superseded_by": None, "redacted_at": None, "created_at": "2026-11-05T00:00:00+00:00"},
+    ]
+    fake = _FakeCasesClient(cases=[row], case_events=events)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=candidates_ui.VIEW_CASES).run()
+        at.session_state[candidates_ui.SELECTED_CASE_ID] = "case-1"
+        at = at.run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    body = _text(at)
+    assert "初回送信" in body, "有効なイベントが履歴に出ていない"
+    assert "1回目フォロー" not in body, "取消し済み(voided_at有り)のイベントが履歴に出ている"
+
+
+# ── マイ候補リストからの「商品案件を作成」ボタン ─────────────────────────────────
+
+class _FakeCreateCaseRpcBuilder:
+    def __init__(self, calls, params, already_exists=False, fail=False):
+        self._calls = calls
+        self._params = params
+        self._already_exists = already_exists
+        self._fail = fail
+
+    def execute(self):
+        self._calls.append(dict(self._params))
+        if self._fail:
+            raise RuntimeError("boom (create_case rpc failed)")
+        return _FakeCasesResponse({"case_id": "new-case-1", "already_exists": self._already_exists})
+
+
+class _FakeListWithCaseRpcClient:
+    """マイ候補リストの既存の偽クライアント（saved_items）に、
+    「商品案件を作成」ボタンが呼ぶcreate_case_from_candidate RPCと、
+    遷移後の案件詳細が読む最小限のcasesテーブルを追加した偽クライアント"""
+
+    def __init__(self, saved_items, products, already_exists=False, fail=False):
+        self._list_store = {"saved_items": [dict(r) for r in saved_items],
+                            "products": {p["id"]: p for p in products}}
+        self._case_store = {
+            "tables": {"cases": [_app_case_row(id="new-case-1")], "case_events": [],
+                      "case_targets": []},
+            "rpc_handlers": {}, "calls": [],
+        }
+        self.auth = _FakeCandAuth()
+        self._already_exists = already_exists
+        self._fail = fail
+        self.rpc_calls = []
+
+    def table(self, name):
+        if name == "saved_items":
+            return _FakeListTable(self._list_store)
+        if name == "cases":
+            return _FakeCasesTable(self._case_store, "cases")
+        raise AssertionError(name)
+
+    def rpc(self, name, params=None):
+        if name == "is_admin":
+            return _FakeCasesResponse(False)
+        assert name == "create_case_from_candidate", name
+        return _FakeCreateCaseRpcBuilder(self.rpc_calls, params,
+                                         already_exists=self._already_exists, fail=self._fail)
+
+
+def test_candidate_list_create_case_button_navigates_to_case_detail():
+    saved_items, products = _list_fixture()
+    fake = _FakeListWithCaseRpcClient(saved_items, products, already_exists=False)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        at = at.radio[0].set_value(candidates_ui.VIEW_LIST).run()
+        create_btn = [b for b in at.button if "商品案件を作成" in b.label][0]
+        at = create_btn.click().run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    assert fake.rpc_calls == [{"p_saved_item_id": "sid-1"}]
+    assert "商品案件を作成しました" in _text(at)
+    assert at.session_state[candidates_ui.VIEW] == candidates_ui.VIEW_CASES
+    assert at.session_state[candidates_ui.SELECTED_CASE_ID] == "new-case-1"
+
+
+def test_candidate_list_create_case_button_already_exists_message():
+    saved_items, products = _list_fixture()
+    fake = _FakeListWithCaseRpcClient(saved_items, products, already_exists=True)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        at = at.radio[0].set_value(candidates_ui.VIEW_LIST).run()
+        create_btn = [b for b in at.button if "商品案件を作成" in b.label][0]
+        at = create_btn.click().run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    assert "すでに商品案件があります" in _text(at)
+
+
+def test_candidate_list_create_case_button_double_click_does_not_duplicate_case():
+    """同じ商品で「商品案件を作成」ボタンを2回押しても、UI側は毎回RPCを呼ぶだけで
+    重複防止ロジックを独自に持たない（＝実際の重複防止はSQL側のunique制約+
+    on conflict do nothingに一本化されている）ことと、2回目はRPCが返す
+    already_exists=trueをそのまま案内文に反映し、同じ案件へ遷移することを確認する。
+    （DB側のunique制約自体の検証は tests/test_cases_sql_migrations.py で行っている）"""
+    saved_items, products = _list_fixture()
+    fake = _FakeListWithCaseRpcClient(saved_items, products, already_exists=False)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        at = at.radio[0].set_value(candidates_ui.VIEW_LIST).run()
+        create_btn = [b for b in at.button if "商品案件を作成" in b.label][0]
+        at = create_btn.click().run()
+        # 1回目の作成成功後、案件詳細へ遷移している。候補リストへ戻って再度押す
+        at.session_state[candidates_ui.VIEW] = candidates_ui.VIEW_LIST
+        at.session_state[candidates_ui.SELECTED_CASE_ID] = ""
+        at = at.run()
+        create_btn2 = [b for b in at.button if "商品案件を作成" in b.label][0]
+        fake._already_exists = True  # 2回目は「既に存在する」応答に切り替える
+        at = create_btn2.click().run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    assert len(fake.rpc_calls) == 2
+    assert fake.rpc_calls[0] == fake.rpc_calls[1] == {"p_saved_item_id": "sid-1"}
+    assert "すでに商品案件があります" in _text(at)
+    # どちらも同じ案件id（new-case-1）を指す。2件目は新しい案件を作らない
+    assert at.session_state[candidates_ui.SELECTED_CASE_ID] == "new-case-1"
+    assert len(fake._case_store["tables"]["cases"]) == 1, "案件が重複して増えている"
+
+
+def test_cases_list_shows_friendly_message_when_no_cases():
+    """案件一覧画面で0件のときも、エラーではなく分かりやすい案内だけを出す"""
+    fake = _FakeCasesClient()
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=candidates_ui.VIEW_CASES).run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    body = _text(at)
+    assert "条件に一致する商品案件がありません" in body
+    assert "エラー" not in body and "Error" not in body and "Traceback" not in body
+
+
+def test_candidate_list_create_case_button_failure_does_not_leak_exception():
+    saved_items, products = _list_fixture()
+    fake = _FakeListWithCaseRpcClient(saved_items, products, fail=True)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app().run()
+        at = at.radio[0].set_value(candidates_ui.VIEW_LIST).run()
+        create_btn = [b for b in at.button if "商品案件を作成" in b.label][0]
+        at = create_btn.click().run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    body = _text(at)
+    assert "boom" not in body and "RuntimeError" not in body and "Traceback" not in body
+    assert "作成できませんでした" in body
+
+
+# ── ログアウトでの状態消去 ──────────────────────────────────────────────────────
+
+def test_logout_clears_case_state():
+    fake = _FakeCasesClient(cases=[_app_case_row()])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=candidates_ui.VIEW_CASES).run()
+        at.session_state[candidates_ui.SELECTED_CASE_ID] = "case-1"
+        at.session_state[cases_ui.LAST_MESSAGE] = "残っていたら不具合"
+        at = at.run()
+        logout = [b for b in at.button if "ログアウト" in b.label][0]
+        at = logout.click().run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    for key in at.session_state.filtered_state:
+        assert not str(key).startswith("case_"), f"{key} が残っている"
 
 
 if __name__ == "__main__":

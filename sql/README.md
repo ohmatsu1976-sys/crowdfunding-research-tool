@@ -287,11 +287,11 @@ commit;
 - **`service_role` / secret key は使わない。**
   すべて SQL Editor（postgres ロール）と、アプリ側の
   `SUPABASE_PUBLISHABLE_KEY` ＋ 本人の JWT だけで完結する。
-- **案件管理（0007〜0009）は、画面（ダッシュボード・案件一覧・マイ候補リストの
-  作成ボタン・AI返信アシスタント）をまだ実装していない。**
-  今回はDBマイグレーション・RLS・RPC・Pythonのデータ層（`cases.py`）・
-  オフラインテストまで。`streamlit_app.py` / `candidates_ui.py` /
-  `auth_ui.py` は無変更。
+- **案件管理（0007〜0009）の画面は、ダッシュボード・案件一覧・案件詳細（基本表示）・
+  マイ候補リストからの作成ボタン・月間目標の設定までを実装済み（`cases_ui.py`）。**
+  訂正・伏せ字化・取消し（`correct_case_event`/`redact_case_event`/
+  `void_case_event`）の画面と、AI返信アシスタント（Anthropic API呼び出し）は
+  まだ実装していない（SQL・データ層のRPC自体は既に存在する）。
 - **`advanced`（商談へ進んだ）から先の段階（フェーズ`deal`/`plan`/`launch`）の
   テーブル・画面はまだ無い。** `cases.phase`列は将来拡張用に用意しているが、
   第1回実装では`reply`だけを使う。

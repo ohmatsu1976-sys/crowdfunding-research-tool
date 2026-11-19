@@ -218,6 +218,18 @@ def resolve_primary_channel(
     return contact_info.resolve_priority(row)["kind"]
 
 
+def resolve_contact_display(
+    contact_snapshot: Dict[str, Any], source_url: str = "", platform: str = ""
+) -> Dict[str, Any]:
+    """画面表示用に、連絡先候補から選んだ1件の全体（kind/email/url/label）を返す
+
+    resolve_primary_channel()と同じ優先順位ロジック（contact_info.resolve_priority）
+    を再利用し、UI側（cases_ui.py）に優先順位判定を重複させない。
+    """
+    row = _contact_snapshot_to_priority_row(contact_snapshot, source_url, platform)
+    return contact_info.resolve_priority(row)
+
+
 # =============================================================================
 # データ構造
 # =============================================================================
@@ -435,6 +447,61 @@ def get_case(client, user_id: str, case_id: str) -> Optional[Case]:
     if not rows or not isinstance(rows[0], dict):
         return None
     return _to_case(rows[0])
+
+
+_CASE_UPDATE_UNSET = object()  # next_action_at/next_action_label を「渡さなかった」ことを表す印
+
+
+def update_case(client, user_id: str, case_id: str, *,
+                memo: Any = None,
+                next_action_at: Any = _CASE_UPDATE_UNSET,
+                next_action_label: Any = _CASE_UPDATE_UNSET,
+                archived: Any = None,
+                primary_channel: Any = None) -> bool:
+    """本人の案件1件を直接更新する
+
+    変更できるのは memo / next_action_at / next_action_label / archived /
+    primary_channel の5列だけ（sql/migrations/0009_cases_rls_grants.sqlの
+    GRANT UPDATEと同じ5列）。status / has_reply / first_sent_at 等の状態機械が
+    管理する列はここでは絶対に送らない（状態変更は必ずlog_event()のRPCを通す）。
+    next_action_at に None を渡すと手動リマインダーを解除できる
+    （candidates.update_saved_itemのpriority_override と同じ「渡さなかった」判定）。
+    """
+    if not case_id or not user_id:
+        return False
+
+    fields: Dict[str, Any] = {}
+    if memo is not None:
+        fields["memo"] = str(memo)[:5000]
+    if next_action_at is not _CASE_UPDATE_UNSET:
+        if next_action_at is None:
+            fields["next_action_at"] = None
+        elif isinstance(next_action_at, datetime):
+            fields["next_action_at"] = next_action_at.astimezone(JST).date().isoformat()
+        elif isinstance(next_action_at, date):
+            fields["next_action_at"] = next_action_at.isoformat()
+        else:
+            return False
+    if next_action_label is not _CASE_UPDATE_UNSET:
+        fields["next_action_label"] = str(next_action_label or "")[:200]
+    if archived is not None:
+        fields["archived"] = bool(archived)
+    if primary_channel is not None:
+        if primary_channel not in CHANNEL_OPTIONS:
+            return False
+        fields["primary_channel"] = primary_channel
+    if not fields:
+        return True
+
+    try:
+        (client.table("cases")
+              .update(fields)
+              .eq("id", case_id)
+              .eq("user_id", user_id)
+              .execute())
+        return True
+    except Exception:
+        return False
 
 
 def list_case_events(client, user_id: str, case_id: str,

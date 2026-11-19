@@ -15,6 +15,7 @@ import streamlit as st
 
 import auth
 import candidates
+import cases
 
 # session_state キー（他機能と衝突しないよう cand_ で始める。
 # チェックボックス等の動的なウィジェットキーも "cand_" で始めており、
@@ -30,6 +31,15 @@ VIEW = "cand_view"                    # 画面切替（商品をリサーチ／�
 PENDING_VIEW = "cand_pending_view"
 SHOW_ARCHIVED = "cand_show_archived"  # 一覧でアーカイブ済みも表示するか
 
+# 商品案件管理（第1段階「返信獲得」）画面へ渡す、直近で作成/選択した案件のid、
+# および画面遷移後に案件一覧/詳細側で表示するメッセージ。
+# "case_" 接頭辞にしているのは cases_ui.clear_state() がこの接頭辞で
+# まとめて消すため。cases_ui.py はこの2つの値をそのまま自分のLAST_MESSAGE/
+# 選択中の案件idとして使う（import循環を避けるため、値自体はここ
+# （画面切替を持つ側）で定義し、cases_ui側から参照する）。
+SELECTED_CASE_ID = "case_selected_id"
+CASES_FLASH_MESSAGE = "case_last_message"
+
 # 管理者ビュー（フェーズ3D）の絞り込み・ページ状態
 ADMIN_FILTER_USER = "cand_admin_filter_user"
 ADMIN_FILTER_STATUS = "cand_admin_filter_status"
@@ -37,15 +47,19 @@ ADMIN_FILTER_PRIORITY = "cand_admin_filter_priority"
 ADMIN_SHOW_ARCHIVED = "cand_admin_show_archived"
 ADMIN_PAGE = "cand_admin_page"
 
+VIEW_DASHBOARD = "dashboard"
 VIEW_SEARCH = "search"
 VIEW_DISCOVER = "discover"
 VIEW_LIST = "list"
+VIEW_CASES = "cases"
 VIEW_ADMIN = "admin"
 
 _VIEW_LABELS = {
+    VIEW_DASHBOARD: "🏠 ダッシュボード",
     VIEW_SEARCH: "🔍 商品をリサーチ",
     VIEW_DISCOVER: "🔎 商品を探す",
     VIEW_LIST: "⭐ マイ候補リスト",
+    VIEW_CASES: "📋 案件一覧",
     VIEW_ADMIN: "🛡️ 管理者ビュー",
 }
 
@@ -59,7 +73,7 @@ def init_state(state) -> None:
     if LAST_MESSAGE not in state:
         state[LAST_MESSAGE] = ""
     if VIEW not in state:
-        state[VIEW] = VIEW_SEARCH
+        state[VIEW] = VIEW_DASHBOARD
 
 
 def clear_state(state) -> None:
@@ -136,8 +150,8 @@ def render(client, rows) -> None:
 # ── 画面切替（フェーズ3C）───────────────────────────────────────────────────────
 
 def get_view(state) -> str:
-    """現在の画面（"search" または "list"）。ログイン直後は必ず search"""
-    return state.get(VIEW, VIEW_SEARCH)
+    """現在の画面。ログイン直後は必ず dashboard（通常版の既定画面）"""
+    return state.get(VIEW, VIEW_DASHBOARD)
 
 
 def _set_session_for_admin_check(client) -> bool:
@@ -179,10 +193,11 @@ def render_view_switch(client) -> None:
     if _set_session_for_admin_check(client):
         is_admin_now = candidates.is_admin(client)
 
-    options = ((VIEW_SEARCH, VIEW_DISCOVER, VIEW_LIST, VIEW_ADMIN) if is_admin_now
-              else (VIEW_SEARCH, VIEW_DISCOVER, VIEW_LIST))
-    if st.session_state.get(VIEW, VIEW_SEARCH) not in options:
-        st.session_state[VIEW] = VIEW_SEARCH
+    options = ((VIEW_DASHBOARD, VIEW_SEARCH, VIEW_DISCOVER, VIEW_LIST, VIEW_CASES, VIEW_ADMIN)
+              if is_admin_now
+              else (VIEW_DASHBOARD, VIEW_SEARCH, VIEW_DISCOVER, VIEW_LIST, VIEW_CASES))
+    if st.session_state.get(VIEW, VIEW_DASHBOARD) not in options:
+        st.session_state[VIEW] = VIEW_DASHBOARD
 
     with st.sidebar:
         st.radio(
@@ -267,7 +282,7 @@ def render_list_screen(client) -> None:
                                            index=priority_index,
                                            key=f"cand_priority_{item.saved_item_id}")
 
-            col_update, col_archive, col_delete = st.columns(3)
+            col_update, col_case, col_archive, col_delete = st.columns(4)
 
             with col_update:
                 if st.button("更新する", key=f"cand_update_{item.saved_item_id}",
@@ -279,6 +294,26 @@ def render_list_screen(client) -> None:
                         memo=memo, status=status, priority_override=new_priority)
                     _flash(st.session_state,
                           candidates.UPDATE_OK if ok else candidates.UPDATE_FAILED)
+                    st.rerun()
+
+            with col_case:
+                if st.button("📋 商品案件を作成", key=f"cand_case_{item.saved_item_id}",
+                            width="stretch",
+                            help="アプローチ（返信獲得）の記録を始めます"):
+                    result = cases.create_case_from_candidate(client, item.saved_item_id)
+                    if result.ok:
+                        st.session_state[PENDING_VIEW] = VIEW_CASES
+                        st.session_state[SELECTED_CASE_ID] = result.case_id
+                        # 遷移先は案件一覧/詳細画面（cases_ui）のため、そちら側が
+                        # 読むメッセージ欄（CASES_FLASH_MESSAGE）へ書く
+                        # （このマイ候補リスト画面自身のLAST_MESSAGEへ書いても、
+                        #  遷移後の画面では読まれない）。
+                        st.session_state[CASES_FLASH_MESSAGE] = (
+                            "すでに商品案件があります。案件一覧を開きます。"
+                            if result.already_exists
+                            else "商品案件を作成しました。案件一覧を開きます。")
+                    else:
+                        _flash(st.session_state, result.message)
                     st.rerun()
 
             with col_archive:

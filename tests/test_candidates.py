@@ -858,10 +858,10 @@ def test_view_switch_state_keys_have_cand_prefix():
     assert candidates_ui.SHOW_ARCHIVED.startswith("cand_")
 
 
-def test_get_view_defaults_to_search():
-    """ログイン直後（画面切替キーが未設定）は必ず商品をリサーチ"""
+def test_get_view_defaults_to_dashboard():
+    """ログイン直後（画面切替キーが未設定）は必ずダッシュボード（通常版の既定画面）"""
     state = {}
-    assert candidates_ui.get_view(state) == candidates_ui.VIEW_SEARCH
+    assert candidates_ui.get_view(state) == candidates_ui.VIEW_DASHBOARD
 
 
 def test_clear_state_removes_view_and_list_widget_keys():

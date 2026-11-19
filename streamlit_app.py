@@ -36,6 +36,7 @@ import contact_info
 import auth
 import auth_ui
 import candidates_ui
+import cases_ui
 import kickstarter_discovery_ui
 import result_schema as rschema
 import search_state as sstate
@@ -92,11 +93,17 @@ if auth.get_role(st.session_state) == auth.ROLE_SUMMIT:
 
 candidates_ui.render_view_switch(auth_client)
 _current_view = candidates_ui.get_view(st.session_state)
+if _current_view == candidates_ui.VIEW_DASHBOARD:
+    cases_ui.render_dashboard_screen(auth_client)
+    st.stop()
 if _current_view == candidates_ui.VIEW_DISCOVER:
     kickstarter_discovery_ui.render_screen(auth_client)
     st.stop()
 if _current_view == candidates_ui.VIEW_LIST:
     candidates_ui.render_list_screen(auth_client)
+    st.stop()
+if _current_view == candidates_ui.VIEW_CASES:
+    cases_ui.render_cases_screen(auth_client)
     st.stop()
 if _current_view == candidates_ui.VIEW_ADMIN:
     candidates_ui.render_admin_screen(auth_client)

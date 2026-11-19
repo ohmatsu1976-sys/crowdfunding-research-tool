@@ -10,6 +10,7 @@ import streamlit as st
 
 import auth
 import candidates_ui
+import cases_ui
 import kickstarter_discovery_ui
 import sender_profiles_ui
 import summit_ui
@@ -86,6 +87,7 @@ def _change_password_form(client, key_prefix: str) -> None:
                                        new_password, confirm)
     if ok:
         candidates_ui.clear_state(st.session_state)  # auth側でログアウト済み
+        cases_ui.clear_state(st.session_state)
         summit_ui.clear_state(st.session_state)
         sender_profiles_ui.clear_state(st.session_state)
         kickstarter_discovery_ui.clear_state(st.session_state)
@@ -105,6 +107,7 @@ def _first_login_screen(client) -> None:
     if st.button("ログアウト"):
         auth.sign_out(client, st.session_state)
         candidates_ui.clear_state(st.session_state)
+        cases_ui.clear_state(st.session_state)
         summit_ui.clear_state(st.session_state)
         sender_profiles_ui.clear_state(st.session_state)
         kickstarter_discovery_ui.clear_state(st.session_state)
@@ -119,6 +122,7 @@ def _sidebar(client) -> None:
         if st.button("ログアウト", width="stretch"):
             auth.sign_out(client, st.session_state)
             candidates_ui.clear_state(st.session_state)
+            cases_ui.clear_state(st.session_state)
             summit_ui.clear_state(st.session_state)
             sender_profiles_ui.clear_state(st.session_state)
             kickstarter_discovery_ui.clear_state(st.session_state)
