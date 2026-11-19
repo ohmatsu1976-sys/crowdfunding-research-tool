@@ -102,6 +102,175 @@ _SEARCH_INTENT_EN = {
 
 ECB_DAILY_URL = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml"
 
+# ───────────────────────────────────────────────────────────────────────────────
+# Kickstarterカテゴリー（親カテゴリー15種。内部条件は英語名を使う）
+# ───────────────────────────────────────────────────────────────────────────────
+
+CATEGORY_ALL = "all"
+
+# 表示順はこの並びを正とする（UIのプルダウンもこの順で描画する）
+CATEGORY_OPTIONS = [
+    CATEGORY_ALL, "Art", "Comics", "Crafts", "Dance", "Design", "Fashion",
+    "Film & Video", "Food", "Games", "Journalism", "Music", "Photography",
+    "Publishing", "Technology", "Theater",
+]
+
+CATEGORY_LABELS_JA = {
+    CATEGORY_ALL: "すべて",
+    "Art": "アート",
+    "Comics": "コミック",
+    "Crafts": "クラフト",
+    "Dance": "ダンス",
+    "Design": "デザイン",
+    "Fashion": "ファッション",
+    "Film & Video": "映画・映像",
+    "Food": "フード",
+    "Games": "ゲーム",
+    "Journalism": "ジャーナリズム",
+    "Music": "音楽",
+    "Photography": "写真",
+    "Publishing": "出版",
+    "Technology": "テクノロジー",
+    "Theater": "シアター",
+}
+
+# Kickstarter公式サブカテゴリー → 親カテゴリーの正規化表（小文字キー）。
+# ここに無い文字列は「判定不能」として扱う（推測で一致させない）。
+_SUBCATEGORY_TO_PARENT = {
+    # Art
+    "ceramics": "Art", "conceptual art": "Art", "digital art": "Art",
+    "illustration": "Art", "installations": "Art", "mixed media": "Art",
+    "painting": "Art", "performance art": "Art", "public art": "Art",
+    "sculpture": "Art", "social practice": "Art", "textiles": "Art", "video art": "Art",
+    # Comics
+    "anthologies": "Comics", "comic books": "Comics", "graphic novels": "Comics",
+    "webcomics": "Comics",
+    # Crafts
+    "candles": "Crafts", "crochet": "Crafts", "diy": "Crafts", "embroidery": "Crafts",
+    "glass": "Crafts", "knitting": "Crafts", "pottery": "Crafts", "printing": "Crafts",
+    "quilts": "Crafts", "taxidermy": "Crafts", "weaving": "Crafts", "woodworking": "Crafts",
+    # Dance
+    "dance performances": "Dance", "residencies": "Dance", "dance workshops": "Dance",
+    # Design
+    "architecture": "Design", "civic design": "Design", "graphic design": "Design",
+    "interactive design": "Design", "product design": "Design", "typography": "Design",
+    # Fashion
+    "accessories": "Fashion", "apparel": "Fashion", "childrenswear": "Fashion",
+    "couture": "Fashion", "footwear": "Fashion", "jewelry": "Fashion",
+    "pet fashion": "Fashion", "ready-to-wear": "Fashion",
+    # Film & Video
+    "action": "Film & Video", "animation": "Film & Video", "documentary": "Film & Video",
+    "drama": "Film & Video", "experimental": "Film & Video", "family": "Film & Video",
+    "fantasy": "Film & Video", "festivals": "Film & Video", "horror": "Film & Video",
+    "movie theaters": "Film & Video", "music videos": "Film & Video",
+    "narrative film": "Film & Video", "romance": "Film & Video",
+    "science fiction": "Film & Video", "shorts": "Film & Video",
+    "television": "Film & Video", "thrillers": "Film & Video", "webseries": "Film & Video",
+    "short film": "Film & Video", "movie": "Film & Video",
+    # Food
+    "bacon": "Food", "community gardens": "Food", "cookbooks": "Food", "drinks": "Food",
+    "farmer's markets": "Food", "farms": "Food", "food trucks": "Food",
+    "restaurants": "Food", "small batch": "Food", "vegan": "Food",
+    # Games
+    "live games": "Games", "mobile games": "Games", "playing cards": "Games",
+    "puzzles": "Games", "tabletop games": "Games", "video games": "Games",
+    "board game": "Games", "card game": "Games",
+    # Journalism
+    "journalism - audio": "Journalism", "journalism - photo": "Journalism",
+    "journalism - print": "Journalism", "journalism - video": "Journalism",
+    "journalism - web": "Journalism",
+    # Music
+    "blues": "Music", "chiptune": "Music", "classical music": "Music",
+    "country & folk": "Music", "electronic music": "Music", "faith": "Music",
+    "hip-hop": "Music", "indie rock": "Music", "jazz": "Music", "latin": "Music",
+    "metal": "Music", "pop": "Music", "punk": "Music", "r&b": "Music", "rock": "Music",
+    "world music": "Music", "album": "Music", "song": "Music",
+    # Photography
+    "animals": "Photography", "fine art photography": "Photography",
+    "nature": "Photography", "people": "Photography",
+    # Publishing
+    "academic": "Publishing", "art books": "Publishing", "calendars": "Publishing",
+    "childrens books": "Publishing", "fiction": "Publishing", "letterpress": "Publishing",
+    "literary journals": "Publishing", "literary spaces": "Publishing",
+    "nonfiction": "Publishing", "periodicals": "Publishing", "poetry": "Publishing",
+    "radio & podcasts": "Publishing", "translations": "Publishing",
+    "young adult": "Publishing", "zines": "Publishing", "novel": "Publishing",
+    "book": "Publishing", "ebook": "Publishing", "e-book": "Publishing",
+    # Technology
+    "3d printing": "Technology", "apps": "Technology", "camera equipment": "Technology",
+    "diy electronics": "Technology", "fabrication tools": "Technology",
+    "flight": "Technology", "gadgets": "Technology", "hardware": "Technology",
+    "makerspaces": "Technology", "robots": "Technology", "software": "Technology",
+    "sound": "Technology", "space exploration": "Technology", "wearables": "Technology",
+    # Theater
+    "immersive": "Theater", "musical": "Theater", "plays": "Theater",
+    "theater spaces": "Theater",
+}
+
+
+def normalize_category(category_raw: Optional[str]) -> Optional[str]:
+    """個別ページのカテゴリー表示文字列を、15の親カテゴリーへ安全に正規化する
+
+    「Technology / Gadgets」のような区切り表記にも対応する。一致しない場合は
+    None（判定不能）を返す。推測で一致させない。
+    """
+    if not category_raw:
+        return None
+    segments = [s.strip().lower() for s in re.split(r"[/>,]", category_raw) if s.strip()]
+    if not segments:
+        return None
+    parent_lower_map = {p.lower(): p for p in CATEGORY_OPTIONS if p != CATEGORY_ALL}
+    for seg in segments:
+        if seg in parent_lower_map:
+            return parent_lower_map[seg]
+    for seg in segments:
+        if seg in _SUBCATEGORY_TO_PARENT:
+            return _SUBCATEGORY_TO_PARENT[seg]
+    return None
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# 支援総額の条件（日本円。下限・上限ともプルダウン選択式）
+# ───────────────────────────────────────────────────────────────────────────────
+
+AMOUNT_NONE_LABEL = "指定なし"
+
+# (円, 表示用ラベル) の順。この並びがプルダウンの表示順になる
+AMOUNT_TIERS = [
+    (1_000_000, "100万円"),
+    (3_000_000, "300万円"),
+    (5_000_000, "500万円"),
+    (10_000_000, "1,000万円"),
+    (30_000_000, "3,000万円"),
+    (50_000_000, "5,000万円"),
+    (100_000_000, "1億円"),
+]
+
+# [(円または None, 表示ラベル)]。Noneは「指定なし」
+AMOUNT_MIN_CHOICES = [(None, AMOUNT_NONE_LABEL)] + [
+    (yen, f"{label}以上") for yen, label in AMOUNT_TIERS]
+AMOUNT_MAX_CHOICES = [(None, AMOUNT_NONE_LABEL)] + [
+    (yen, f"{label}以下") for yen, label in AMOUNT_TIERS]
+
+
+def validate_amount_range(min_yen: Optional[int], max_yen: Optional[int]) -> str:
+    """下限が上限を超えていればエラー文言、問題なければ空文字を返す"""
+    if min_yen is not None and max_yen is not None and min_yen > max_yen:
+        return "支援総額の下限が上限を超えています。条件を見直してください。"
+    return ""
+
+
+def matches_amount_range(jpy: Optional[float], min_yen: Optional[int],
+                         max_yen: Optional[int]) -> bool:
+    """日本円換算額が指定範囲内か（境界値を含む）。jpyがNoneなら常にFalse"""
+    if jpy is None:
+        return False
+    if min_yen is not None and jpy < min_yen:
+        return False
+    if max_yen is not None and jpy > max_yen:
+        return False
+    return True
+
 
 # ───────────────────────────────────────────────────────────────────────────────
 # データ構造
@@ -114,6 +283,7 @@ class Product:
     image_url: str = ""
     summary_ja: str = ""
     category_raw: str = ""
+    category_parent: str = ""         # normalize_category() の結果（判定不能なら空文字）
     maker: str = ""
     country: str = ""
     raised_amount: Optional[float] = None
@@ -138,6 +308,7 @@ class Product:
     raised_amount_jpy: Optional[float] = None
     jpy_rate_date: str = ""
     jpy_unavailable_reason: str = ""
+    exclusion_reason: str = ""        # 条件外・判定不能バケツに入れた理由（表示用）
 
 
 @dataclass
@@ -157,21 +328,34 @@ class DiscoveryResult:
     jpy_rate_date: str = ""
     jpy_rate_error: str = ""
 
+    # カテゴリー・支援総額による絞り込み（追加分）
+    category_unknown: List[Product] = field(default_factory=list)
+    amount_unknown: List[Product] = field(default_factory=list)
+    excluded_condition: List[Product] = field(default_factory=list)
+    candidate_count: int = 0
+    fetch_success_count: int = 0
+    matched_count: int = 0
+    off_condition_count: int = 0
+    category_unknown_count: int = 0
+    amount_unknown_count: int = 0
+
 
 # ───────────────────────────────────────────────────────────────────────────────
 # 入力検証
 # ───────────────────────────────────────────────────────────────────────────────
 
-def validate_keyword(raw: str) -> Tuple[str, str]:
+def validate_keyword(raw: str, category: str = CATEGORY_ALL) -> Tuple[str, str]:
     """キーワードを検証する。戻り値は (整形済みキーワード, エラー文言)。
 
+    カテゴリーが「すべて」の場合だけキーワードを必須にする。
+    カテゴリーが特定されている場合は、空欄でも検索できる。
     エラーがあれば整形済みキーワードは空文字。
     """
     text = (raw or "").strip()
-    if not text:
-        return "", "キーワードを入力してください。"
     if len(text) > KEYWORD_MAX_LEN:
         return "", f"キーワードは最大{KEYWORD_MAX_LEN}文字までです（現在{len(text)}文字）。"
+    if not text and category == CATEGORY_ALL:
+        return "", "カテゴリーを「すべて」以外に選ぶか、キーワードを入力してください。"
     return text, ""
 
 
@@ -533,17 +717,53 @@ def convert_to_jpy(amount: Optional[float], currency: str,
 # 検索・取得プロンプト
 # ───────────────────────────────────────────────────────────────────────────────
 
-def _search_prompt(status: str, keyword: str) -> str:
+def describe_amount_range_ja(min_yen: Optional[int], max_yen: Optional[int]) -> str:
+    def _fmt(yen: int) -> str:
+        for v, label in AMOUNT_TIERS:
+            if v == yen:
+                return label
+        return f"{yen:,}円"
+    if min_yen is not None and max_yen is not None:
+        return f"{_fmt(min_yen)}以上{_fmt(max_yen)}以下"
+    if min_yen is not None:
+        return f"{_fmt(min_yen)}以上"
+    if max_yen is not None:
+        return f"{_fmt(max_yen)}以下"
+    return ""
+
+
+def _search_prompt(status: str, keyword: str, category: str = CATEGORY_ALL,
+                   min_yen: Optional[int] = None, max_yen: Optional[int] = None) -> str:
     intent = _SEARCH_INTENT_EN.get(status, _SEARCH_INTENT_EN[STATUS_LIVE])
+    extra_hints = []
+    if category != CATEGORY_ALL:
+        extra_hints.append(f"Prefer Kickstarter's official category: {category}.")
+    amount_ja = describe_amount_range_ja(min_yen, max_yen)
+    if amount_ja:
+        extra_hints.append(
+            f"Prefer projects whose total amount raised is roughly {amount_ja} "
+            "(approximate Japanese Yen figure, for search guidance only)."
+        )
+    extra_txt = (" " + " ".join(extra_hints)) if extra_hints else ""
+
+    if keyword:
+        keyword_txt = f'The user\'s Japanese search interest is: "{keyword}".'
+    else:
+        keyword_txt = ("The user did not specify a keyword; search broadly within the "
+                       "category/status/amount conditions above.")
+
     return f"""\
-Use the web_search tool exactly once to search kickstarter.com for: {intent}.
-The user's Japanese search interest is: "{keyword}". Translate this interest into
+Use the web_search tool exactly once to search kickstarter.com for: {intent}.{extra_txt}
+{keyword_txt} Translate this interest into
 an effective English search query yourself, but do NOT invent product facts that
 are not in the search results. Prefer physical consumer products (gadgets,
 outdoor gear, kitchenware, bags, wearables, accessories, tools, home goods).
 Avoid film/music/book/game/software-only/charity projects when the title makes
-that clear. After searching, just reply with a short one-line acknowledgement
-in Japanese — I will read the actual search results separately, not your reply."""
+that clear. Do NOT treat any category name or funding amount mentioned in the
+search result snippets as confirmed fact — those will be verified separately
+by fetching each project's own page. After searching, just reply with a short
+one-line acknowledgement in Japanese — I will read the actual search results
+separately, not your reply."""
 
 
 def _fetch_prompt(url: str) -> str:
@@ -594,17 +814,24 @@ def _usage_from(message: Any) -> Dict[str, int]:
 
 
 def run_status_search(client, status: str, keyword: str,
-                      model_id: str = MODEL_ID) -> Tuple[List[Tuple[str, str]], Dict[str, int], str]:
+                      model_id: str = MODEL_ID,
+                      category: str = CATEGORY_ALL,
+                      min_yen: Optional[int] = None,
+                      max_yen: Optional[int] = None,
+                      ) -> Tuple[List[Tuple[str, str]], Dict[str, int], str]:
     """1ステータスにつき最大1回のWeb Search呼び出し
 
     戻り値は ([(候補URL, status)], usage, エラー文言)。
+    category・min_yen・max_yenは検索意図の優先付けに使うだけで、最終判定には
+    使わない（最終判定は必ずWeb Fetchで取得した実データで行う）。
     """
     try:
         message = client.messages.create(
             model=model_id,
             max_tokens=512,
             tools=[build_web_search_tool(max_uses=1)],
-            messages=[{"role": "user", "content": _search_prompt(status, keyword)}],
+            messages=[{"role": "user",
+                      "content": _search_prompt(status, keyword, category, min_yen, max_yen)}],
         )
     except Exception as e:
         return [], {}, f"{type(e).__name__}: {e}"
@@ -681,10 +908,52 @@ def _to_int(v: Any) -> Optional[int]:
         return None
 
 
+def _apply_category_amount_filter(result: "DiscoveryResult", category: str,
+                                  min_yen: Optional[int], max_yen: Optional[int]) -> None:
+    """カテゴリー・支援総額の条件で、by_status の商品をさらに絞り込む
+
+    category="すべて"かつmin_yen/max_yenともにNoneなら完全に素通し（既存動作を変えない）。
+    カテゴリー・金額とも判定不能な商品は、推測で一致扱いにせず別枠へ移す。
+    """
+    amount_condition_set = min_yen is not None or max_yen is not None
+    for status in STATUS_OPTIONS:
+        kept: List[Product] = []
+        for p in result.by_status[status]:
+            if category != CATEGORY_ALL and not p.category_parent:
+                p.exclusion_reason = "カテゴリーを確認できない"
+                result.category_unknown.append(p)
+                continue
+            if category != CATEGORY_ALL and p.category_parent != category:
+                p.exclusion_reason = "選択カテゴリーと不一致"
+                result.excluded_condition.append(p)
+                continue
+            if amount_condition_set:
+                if p.raised_amount_jpy is None:
+                    p.exclusion_reason = p.jpy_unavailable_reason or "支援総額を確認できない"
+                    result.amount_unknown.append(p)
+                    continue
+                if not matches_amount_range(p.raised_amount_jpy, min_yen, max_yen):
+                    if min_yen is not None and p.raised_amount_jpy < min_yen:
+                        p.exclusion_reason = "支援総額が下限未満"
+                    else:
+                        p.exclusion_reason = "支援総額が上限超過"
+                    result.excluded_condition.append(p)
+                    continue
+            kept.append(p)
+        result.by_status[status] = kept
+
+
 def run_discovery(client, keyword: str, selected_statuses: List[str],
+                  category: str = CATEGORY_ALL,
+                  min_yen: Optional[int] = None,
+                  max_yen: Optional[int] = None,
                   model_id: str = MODEL_ID,
                   now: Optional[datetime] = None) -> DiscoveryResult:
-    """検索キーワード・選択ステータスから候補を探索する（API呼び出しの中心）"""
+    """検索キーワード・選択ステータス・カテゴリー・支援総額条件から候補を探索する
+
+    category・min_yen・max_yenを既定値（すべて／指定なし）のまま呼ぶと、
+    以前のステータスのみの動作と完全に同じ結果になる。
+    """
     result = DiscoveryResult()
     total_in = 0
     total_out = 0
@@ -693,7 +962,9 @@ def run_discovery(client, keyword: str, selected_statuses: List[str],
     # ── Phase A: Web Search（ステータスごとに最大1回、合計最大3回）──────────
     raw_candidates: List[Tuple[str, str]] = []
     for status in selected_statuses[:MAX_SEARCH_CALLS]:
-        tagged, usage, error = run_status_search(client, status, keyword, model_id)
+        tagged, usage, error = run_status_search(
+            client, status, keyword, model_id, category=category,
+            min_yen=min_yen, max_yen=max_yen)
         total_in += usage.get("input_tokens", 0)
         total_out += usage.get("output_tokens", 0)
         if error:
@@ -708,6 +979,7 @@ def run_discovery(client, keyword: str, selected_statuses: List[str],
 
     capped, dropped_by_cap = cap_candidates(accepted)
     result.candidates_dropped_by_cap = dropped_by_cap
+    result.candidate_count = len(capped)
 
     if not raw_candidates and not result.search_errors:
         result.search_errors.append("検索結果に候補URLが含まれていませんでした")
@@ -715,6 +987,7 @@ def run_discovery(client, keyword: str, selected_statuses: List[str],
     # ── Phase B/C: Web Fetch（最大10件）─────────────────────────────────
     t1 = time.time()
     fetch_count = 0
+    fetch_success_count = 0
     now = now or datetime.now(timezone.utc)
     for url, search_status in capped:
         if fetch_count >= MAX_FETCH_CALLS:
@@ -726,6 +999,10 @@ def run_discovery(client, keyword: str, selected_statuses: List[str],
         if error or product is None:
             result.fetch_failed.append({"url": url, "reason": error or "不明なエラー"})
             continue
+        fetch_success_count += 1
+
+        # カテゴリーは常に正規化して保持する（カテゴリー条件が無くても表示に使う）
+        product.category_parent = normalize_category(product.category_raw) or ""
 
         non_physical, reason = is_non_physical(product)
         if non_physical:
@@ -741,8 +1018,11 @@ def run_discovery(client, keyword: str, selected_statuses: List[str],
         elif product.status in selected_statuses:
             result.by_status[product.status].append(product)
         else:
+            product.exclusion_reason = (
+                f"状態が検索条件と不一致（検出: {STATUS_LABELS_JA[product.status]}）")
             result.off_selection.append(product)
     fetch_elapsed = time.time() - t1
+    result.fetch_success_count = fetch_success_count
 
     # ── JPY換算 ───────────────────────────────────────────────────────────
     rates, rate_date, rate_error = fetch_ecb_rates()
@@ -758,9 +1038,20 @@ def run_discovery(client, keyword: str, selected_statuses: List[str],
         p.jpy_rate_date = rate_date if jpy is not None else ""
         p.jpy_unavailable_reason = reason
 
+    # ── カテゴリー・支援総額の最終判定（既定値なら素通し＝既存動作を保つ）──────
+    _apply_category_amount_filter(result, category, min_yen, max_yen)
+
     for status in STATUS_OPTIONS:
         result.by_status[status].sort(
             key=lambda p: (p.raised_amount_jpy is None, -(p.raised_amount_jpy or 0)))
+
+    result.matched_count = sum(len(result.by_status[s]) for s in STATUS_OPTIONS)
+    result.off_condition_count = (
+        len(result.off_selection) + len(result.mismatch)
+        + len(result.excluded_condition) + len(result.excluded_non_physical)
+    )
+    result.category_unknown_count = len(result.category_unknown)
+    result.amount_unknown_count = len(result.amount_unknown)
 
     result.usage = {
         "input_tokens": total_in,

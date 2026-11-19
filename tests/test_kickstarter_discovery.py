@@ -488,5 +488,323 @@ def test_run_discovery_search_limited_to_three_calls_total():
     assert kd.MAX_SEARCH_CALLS == 3
 
 
+# ── カテゴリー：日本語↔英語の対応 ─────────────────────────────────────────────
+
+def test_category_labels_cover_all_fifteen_parents_plus_all():
+    """日本語カテゴリー表記が15カテゴリー＋「すべて」の16件ぶん揃っている"""
+    assert len(kd.CATEGORY_OPTIONS) == 16
+    assert kd.CATEGORY_OPTIONS[0] == kd.CATEGORY_ALL
+    for code in kd.CATEGORY_OPTIONS:
+        assert code in kd.CATEGORY_LABELS_JA, f"{code} の日本語表記が無い"
+    assert kd.CATEGORY_LABELS_JA[kd.CATEGORY_ALL] == "すべて"
+    assert kd.CATEGORY_LABELS_JA["Technology"] == "テクノロジー"
+    assert kd.CATEGORY_LABELS_JA["Film & Video"] == "映画・映像"
+
+
+def test_category_passed_into_search_prompt():
+    """選択したカテゴリーが検索プロンプトへ渡る（英語名で）"""
+    prompt = kd._search_prompt(kd.STATUS_LIVE, "x", category="Technology")
+    assert "Technology" in prompt
+    prompt_all = kd._search_prompt(kd.STATUS_LIVE, "x", category=kd.CATEGORY_ALL)
+    assert "Prefer Kickstarter's official category" not in prompt_all
+
+
+def test_amount_range_passed_into_search_prompt_as_guidance_only():
+    """支援総額の条件が検索プロンプトへ案内として渡る（確定情報とは明記しない）"""
+    prompt = kd._search_prompt(kd.STATUS_ENDED, "x", min_yen=5_000_000, max_yen=50_000_000)
+    assert "500万円以上5,000万円以下" in prompt
+    assert "guidance only" in prompt
+
+
+def test_search_prompt_warns_not_to_trust_snippet_category_or_amount():
+    """検索結果スニペットのカテゴリー・金額を確定情報としないようモデルへ指示する"""
+    prompt = kd._search_prompt(kd.STATUS_LIVE, "x", category="Technology", min_yen=1_000_000)
+    assert "snippets as confirmed fact" in prompt
+
+
+# ── モデルの最終回答文を候補抽出に使わない（カテゴリー検索でも同じ規律）────────────
+
+def test_category_search_still_ignores_final_text_for_urls():
+    message = {
+        "content": [
+            {"type": "web_search_tool_result", "content": [
+                {"type": "web_search_result",
+                 "url": "https://www.kickstarter.com/projects/real/technology-gadget",
+                 "title": "Real Gadget"},
+            ]},
+            {"type": "text",
+             "text": "I also recall a Technology product at "
+                     "https://www.kickstarter.com/projects/fake/hallucinated-gadget"},
+        ],
+    }
+    urls = kd.extract_search_result_urls(message)
+    assert urls == [("https://www.kickstarter.com/projects/real/technology-gadget", "Real Gadget")]
+
+
+# ── カテゴリーの正規化（親カテゴリー・サブカテゴリー）───────────────────────────
+
+def test_normalize_category_exact_parent_match():
+    assert kd.normalize_category("Technology") == "Technology"
+    assert kd.normalize_category("technology") == "Technology"
+
+
+def test_normalize_category_subcategory_maps_to_parent():
+    assert kd.normalize_category("Gadgets") == "Technology"
+    assert kd.normalize_category("Product Design") == "Design"
+    assert kd.normalize_category("Wearables") == "Technology"
+
+
+def test_normalize_category_handles_breadcrumb_format():
+    """「Technology / Gadgets」のような区切り表記にも対応する"""
+    assert kd.normalize_category("Technology / Gadgets") == "Technology"
+    assert kd.normalize_category("Design > Product Design") == "Design"
+
+
+def test_normalize_category_unknown_text_returns_none_not_a_guess():
+    """未知のカテゴリー文字列は判定不能（Noneを推測で埋めない）"""
+    assert kd.normalize_category("Some Made Up Category") is None
+    assert kd.normalize_category("") is None
+    assert kd.normalize_category(None) is None
+
+
+# ── 個別ページのカテゴリーで最終判定する（検索スニペットは信用しない）────────────
+
+def test_run_discovery_final_category_judgement_uses_fetched_page_only():
+    """検索結果のタイトルに"Technology"と書かれていても、実際のcategory_rawで判定する"""
+    url = "https://www.kickstarter.com/projects/foo/not-tech-gadget"
+    search_resp = _search_message([(url, "Amazing NEW Technology Gadget!!!")])
+    fetch_resp = _fetch_message(url, "2026-10-19T06:00:00+00:00", {
+        "name": "Hand Knit Scarf", "image_url": None, "summary_ja": "手編みマフラーです。",
+        "category_raw": "Knitting",  # 実際は Crafts のサブカテゴリー
+        "maker": "M", "country": "US", "raised_amount": 20000, "currency": "USD",
+        "goal_amount": 10000, "backers": 100, "launch_date": "2026-01-01",
+        "end_date_iso": "2026-03-01", "days_left_text_raw": None,
+        "late_pledge_confirmed": False, "reported_status_text": "funded",
+        "canonical_url": url,
+    })
+    client = _FakeClient([search_resp, fetch_resp])
+    result = kd.run_discovery(client, "x", [kd.STATUS_ENDED], category="Technology",
+                              now=datetime(2026, 10, 19, 6, 0, 0, tzinfo=timezone.utc))
+    assert result.by_status[kd.STATUS_ENDED] == []
+    assert len(result.excluded_condition) == 1
+    assert result.excluded_condition[0].category_parent == "Crafts"
+    assert result.excluded_condition[0].exclusion_reason == "選択カテゴリーと不一致"
+
+
+def test_category_unknown_is_not_force_matched():
+    """個別ページのカテゴリーを確認できない商品は、推測で一致扱いにしない"""
+    url = "https://www.kickstarter.com/projects/foo/mystery-gadget"
+    search_resp = _search_message([(url, "Mystery Gadget")])
+    fetch_resp = _fetch_message(url, "2026-10-19T06:00:00+00:00", {
+        "name": "Mystery Gadget", "image_url": None, "summary_ja": "謎の商品です。",
+        "category_raw": None,  # カテゴリーがページ上で確認できない
+        "maker": "M", "country": "US", "raised_amount": 20000, "currency": "USD",
+        "goal_amount": 10000, "backers": 100, "launch_date": "2026-01-01",
+        "end_date_iso": "2026-03-01", "days_left_text_raw": None,
+        "late_pledge_confirmed": False, "reported_status_text": "funded",
+        "canonical_url": url,
+    })
+    client = _FakeClient([search_resp, fetch_resp])
+    result = kd.run_discovery(client, "x", [kd.STATUS_ENDED], category="Technology",
+                              now=datetime(2026, 10, 19, 6, 0, 0, tzinfo=timezone.utc))
+    assert result.by_status[kd.STATUS_ENDED] == []
+    assert len(result.category_unknown) == 1
+    assert result.category_unknown[0].exclusion_reason == "カテゴリーを確認できない"
+
+
+def test_category_all_does_not_filter_by_category():
+    """カテゴリー「すべて」なら、カテゴリー不明でも最終結果から除外されない"""
+    url = "https://www.kickstarter.com/projects/foo/any-gadget"
+    search_resp = _search_message([(url, "Any Gadget")])
+    fetch_resp = _fetch_message(url, "2026-10-19T06:00:00+00:00", {
+        "name": "Any Gadget", "image_url": None, "summary_ja": "任意の商品です。",
+        "category_raw": None, "maker": "M", "country": "US",
+        "raised_amount": 20000, "currency": "USD", "goal_amount": 10000, "backers": 100,
+        "launch_date": "2026-01-01", "end_date_iso": "2026-03-01",
+        "days_left_text_raw": None, "late_pledge_confirmed": False,
+        "reported_status_text": "funded", "canonical_url": url,
+    })
+    client = _FakeClient([search_resp, fetch_resp])
+    result = kd.run_discovery(client, "x", [kd.STATUS_ENDED], category=kd.CATEGORY_ALL,
+                              now=datetime(2026, 10, 19, 6, 0, 0, tzinfo=timezone.utc))
+    assert len(result.by_status[kd.STATUS_ENDED]) == 1
+    assert result.category_unknown == []
+
+
+# ── キーワード必須ルール（カテゴリー次第で変わる）───────────────────────────────
+
+def test_keyword_optional_when_category_specified():
+    keyword, error = kd.validate_keyword("", category="Technology")
+    assert error == ""
+    assert keyword == ""
+
+
+def test_keyword_required_when_category_is_all():
+    keyword, error = kd.validate_keyword("", category=kd.CATEGORY_ALL)
+    assert error != ""
+    assert keyword == ""
+
+
+def test_keyword_too_long_rejected_regardless_of_category():
+    _, error = kd.validate_keyword("x" * 201, category="Technology")
+    assert error != ""
+
+
+# ── 支援総額の下限・上限判定（境界値を含む）──────────────────────────────────
+
+def test_matches_amount_range_lower_bound_only():
+    assert kd.matches_amount_range(5_000_000, 5_000_000, None) is True   # 境界値
+    assert kd.matches_amount_range(4_999_999, 5_000_000, None) is False
+    assert kd.matches_amount_range(9_999_999_999, 5_000_000, None) is True
+
+
+def test_matches_amount_range_upper_bound_only():
+    assert kd.matches_amount_range(50_000_000, None, 50_000_000) is True  # 境界値
+    assert kd.matches_amount_range(50_000_001, None, 50_000_000) is False
+    assert kd.matches_amount_range(0, None, 50_000_000) is True
+
+
+def test_matches_amount_range_both_bounds_inclusive():
+    assert kd.matches_amount_range(5_000_000, 5_000_000, 50_000_000) is True
+    assert kd.matches_amount_range(50_000_000, 5_000_000, 50_000_000) is True
+    assert kd.matches_amount_range(4_999_999, 5_000_000, 50_000_000) is False
+    assert kd.matches_amount_range(50_000_001, 5_000_000, 50_000_000) is False
+
+
+def test_matches_amount_range_none_jpy_never_matches():
+    assert kd.matches_amount_range(None, 5_000_000, None) is False
+    assert kd.matches_amount_range(None, None, None) is False
+
+
+# ── 下限が上限を超える場合のエラー ────────────────────────────────────────────
+
+def test_validate_amount_range_rejects_min_above_max():
+    error = kd.validate_amount_range(50_000_000, 5_000_000)
+    assert error != ""
+
+
+def test_validate_amount_range_allows_min_equal_max():
+    assert kd.validate_amount_range(5_000_000, 5_000_000) == ""
+
+
+def test_validate_amount_range_allows_either_side_unset():
+    assert kd.validate_amount_range(None, 5_000_000) == ""
+    assert kd.validate_amount_range(5_000_000, None) == ""
+    assert kd.validate_amount_range(None, None) == ""
+
+
+# ── 複数通貨のECB日本円換算（固定レート不使用）──────────────────────────────────
+
+def test_convert_to_jpy_handles_gbp_in_addition_to_usd():
+    rates = {"EUR": 1.0, "USD": 1.08, "GBP": 0.84, "JPY": 160.0}
+    jpy, reason = kd.convert_to_jpy(100.0, "GBP", rates)
+    assert reason == ""
+    assert round(jpy, 2) == round(100.0 / 0.84 * 160.0, 2)
+
+
+def test_amount_unknown_when_ecb_rate_missing_for_currency_and_condition_set():
+    """金額条件があるとき、換算できない商品は一致結果に混ぜず判定不能へ回す"""
+    url = "https://www.kickstarter.com/projects/foo/twd-gadget"
+    search_resp = _search_message([(url, "TWD Gadget")])
+    fetch_resp = _fetch_message(url, "2026-10-19T06:00:00+00:00", {
+        "name": "TWD Gadget", "image_url": None, "summary_ja": "台湾ドルの商品です。",
+        "category_raw": "Gadgets", "maker": "M", "country": "TW",
+        "raised_amount": 1_000_000, "currency": "TWD",  # ECB未対応通貨
+        "goal_amount": 500_000, "backers": 100, "launch_date": "2026-01-01",
+        "end_date_iso": "2026-03-01", "days_left_text_raw": None,
+        "late_pledge_confirmed": False, "reported_status_text": "funded",
+        "canonical_url": url,
+    })
+    client = _FakeClient([search_resp, fetch_resp])
+
+    import requests
+    original_get = requests.get
+    requests.get = lambda *a, **k: _FakeEcbResp()
+    try:
+        result = kd.run_discovery(client, "x", [kd.STATUS_ENDED], min_yen=1_000_000,
+                                  now=datetime(2026, 10, 19, 6, 0, 0, tzinfo=timezone.utc))
+    finally:
+        requests.get = original_get
+
+    assert result.by_status[kd.STATUS_ENDED] == []
+    assert len(result.amount_unknown) == 1
+    assert "対応していない通貨" in result.amount_unknown[0].exclusion_reason
+
+
+class _FakeEcbResp:
+    status_code = 200
+    content = (
+        b'<?xml version="1.0" encoding="UTF-8"?>'
+        b'<gesmes:Envelope xmlns:gesmes="http://www.gesmes.org/xml/2002-08-01" '
+        b'xmlns="http://www.ecb.int/vocabulary/2002-08-01/eurofxref">'
+        b'<Cube><Cube time="2026-10-19">'
+        b'<Cube currency="USD" rate="1.08"/><Cube currency="JPY" rate="160.0"/>'
+        b'</Cube></Cube></gesmes:Envelope>'
+    )
+
+
+# ── 条件一致商品は日本円換算額の高い順 ─────────────────────────────────────────
+
+def test_matched_products_sorted_by_jpy_descending():
+    url_a = "https://www.kickstarter.com/projects/foo/cheap-gadget"
+    url_b = "https://www.kickstarter.com/projects/foo/expensive-gadget"
+    search_resp = _search_message([(url_a, "Cheap"), (url_b, "Expensive")])
+    fetch_a = _fetch_message(url_a, "2026-10-19T06:00:00+00:00", {
+        "name": "Cheap Gadget", "image_url": None, "summary_ja": "x", "category_raw": "Gadgets",
+        "maker": "M", "country": "US", "raised_amount": 1000, "currency": "USD",
+        "goal_amount": 500, "backers": 10, "launch_date": "2026-01-01",
+        "end_date_iso": "2026-03-01", "days_left_text_raw": None,
+        "late_pledge_confirmed": False, "reported_status_text": "funded",
+        "canonical_url": url_a,
+    })
+    fetch_b = _fetch_message(url_b, "2026-10-19T06:00:05+00:00", {
+        "name": "Expensive Gadget", "image_url": None, "summary_ja": "x",
+        "category_raw": "Gadgets", "maker": "M", "country": "US",
+        "raised_amount": 900000, "currency": "USD", "goal_amount": 500,
+        "backers": 9000, "launch_date": "2026-01-01", "end_date_iso": "2026-03-01",
+        "days_left_text_raw": None, "late_pledge_confirmed": False,
+        "reported_status_text": "funded", "canonical_url": url_b,
+    })
+    client = _FakeClient([search_resp, fetch_a, fetch_b])
+
+    import requests
+    original_get = requests.get
+    requests.get = lambda *a, **k: _FakeEcbResp()
+    try:
+        result = kd.run_discovery(client, "x", [kd.STATUS_ENDED],
+                                  now=datetime(2026, 10, 19, 6, 0, 0, tzinfo=timezone.utc))
+    finally:
+        requests.get = original_get
+
+    names = [p.name for p in result.by_status[kd.STATUS_ENDED]]
+    assert names == ["Expensive Gadget", "Cheap Gadget"], names
+
+
+# ── 検索上限（カテゴリー・金額条件を使っても変わらない）────────────────────────
+
+def test_search_and_fetch_caps_unchanged_with_category_and_amount_filters():
+    many_urls = [(f"https://www.kickstarter.com/projects/foo/g{i}", f"G{i}") for i in range(8)]
+    search_resp = _search_message(many_urls)
+    fields = {
+        "name": "G", "image_url": None, "summary_ja": "x", "category_raw": "Gadgets",
+        "maker": "M", "country": "US", "raised_amount": 1_000_000, "currency": "USD",
+        "goal_amount": 1, "backers": 1, "launch_date": "2026-01-01",
+        "end_date_iso": "2026-11-01", "days_left_text_raw": None,
+        "late_pledge_confirmed": False, "reported_status_text": "live",
+        "canonical_url": "https://www.kickstarter.com/projects/foo/g0",
+    }
+    responses = [search_resp] + [
+        _fetch_message("https://www.kickstarter.com/projects/foo/g0",
+                       "2026-10-19T06:00:00+00:00", fields)
+        for _ in range(4)  # STATUS_LIVE のガイドライン上限
+    ]
+    client = _FakeClient(responses)
+    result = kd.run_discovery(client, "x", [kd.STATUS_LIVE], category="Technology",
+                              min_yen=1_000_000, max_yen=100_000_000,
+                              now=datetime(2026, 10, 19, 6, 0, 0, tzinfo=timezone.utc))
+    assert result.usage["search_calls"] == 1
+    assert result.usage["fetch_calls"] == 4  # PER_STATUS_GUIDELINE["live"]
+
+
 if __name__ == "__main__":
     sys.exit(run(dict(globals()), "kickstarter_discovery 単体テスト（外部通信なし）"))

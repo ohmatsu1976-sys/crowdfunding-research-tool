@@ -316,5 +316,229 @@ def test_search_and_fetch_limits_are_not_changed_by_ui():
     assert kd.MAX_FETCH_CALLS == 10
 
 
+# ── カテゴリー・支援総額の絞り込みUI ───────────────────────────────────────────
+
+def test_category_selectbox_shows_japanese_labels_in_order():
+    """選択肢はformat_funcで変換された日本語表記として描画される
+    （内部的に渡す値は英語名のままであることは他のテストで確認済み）"""
+    at = _goto_discover(_app())
+    category_box = at.selectbox[0]
+    expected_labels = [kd.CATEGORY_LABELS_JA[c] for c in kd.CATEGORY_OPTIONS]
+    assert list(category_box.options) == expected_labels
+    assert list(category_box.options)[:4] == ["すべて", "アート", "コミック", "クラフト"]
+
+
+def test_amount_min_max_selectboxes_default_to_none_specified():
+    at = _goto_discover(_app())
+    min_box = [sb for sb in at.selectbox if sb.label == "支援総額（下限）"][0]
+    max_box = [sb for sb in at.selectbox if sb.label == "支援総額（上限）"][0]
+    assert min_box.value == kd.AMOUNT_NONE_LABEL
+    assert max_box.value == kd.AMOUNT_NONE_LABEL
+
+
+def test_keyword_empty_with_specific_category_allows_search():
+    calls = []
+
+    def _fake(client, keyword, statuses, **kwargs):
+        calls.append((keyword, kwargs.get("category")))
+        return _fake_result_with_one_live_product()
+
+    original = kd.run_discovery
+    kd.run_discovery = _fake
+    try:
+        at = _goto_discover(_app())
+        category_box = at.selectbox[0]
+        at = category_box.set_value("Technology").run()
+        search_btn = [b for b in at.button if "検索する" in b.label][0]
+        at = search_btn.click().run()
+    finally:
+        kd.run_discovery = original
+
+    assert not at.exception, str(at.exception)
+    assert len(calls) == 1, "カテゴリー指定＋キーワード空欄で検索が実行されなかった"
+    assert calls[0][0] == ""
+    assert calls[0][1] == "Technology"
+
+
+def test_keyword_empty_with_category_all_is_rejected_without_calling_api():
+    calls = []
+    original = kd.run_discovery
+    kd.run_discovery = lambda *a, **k: calls.append(1) or original(*a, **k)
+    try:
+        at = _goto_discover(_app())
+        search_btn = [b for b in at.button if "検索する" in b.label][0]
+        at = search_btn.click().run()
+    finally:
+        kd.run_discovery = original
+
+    assert not at.exception, str(at.exception)
+    assert not calls, "カテゴリー「すべて」＋キーワード空欄でもAPIが呼ばれた"
+    assert "キーワードを入力してください" in _text(at) or "カテゴリーを" in _text(at)
+
+
+def test_amount_min_greater_than_max_is_rejected_without_calling_api():
+    calls = []
+    original = kd.run_discovery
+    kd.run_discovery = lambda *a, **k: calls.append(1) or original(*a, **k)
+    try:
+        at = _goto_discover(_app())
+        at.text_input[0].set_value("調理器具").run()
+        min_box = [sb for sb in at.selectbox if sb.label == "支援総額（下限）"][0]
+        max_box = [sb for sb in at.selectbox if sb.label == "支援総額（上限）"][0]
+        at = min_box.set_value("5,000万円以上").run()
+        at = max_box.set_value("500万円以下").run()
+        search_btn = [b for b in at.button if "検索する" in b.label][0]
+        at = search_btn.click().run()
+    finally:
+        kd.run_discovery = original
+
+    assert not at.exception, str(at.exception)
+    assert not calls, "下限が上限を超えていてもAPIが呼ばれた"
+    assert "下限が上限を超えています" in _text(at)
+
+
+def test_amount_min_equal_max_is_accepted():
+    original = kd.run_discovery
+    kd.run_discovery = lambda client, keyword, statuses, **kwargs: \
+        _fake_result_with_one_live_product()
+    try:
+        at = _goto_discover(_app())
+        at.text_input[0].set_value("調理器具").run()
+        min_box = [sb for sb in at.selectbox if sb.label == "支援総額（下限）"][0]
+        max_box = [sb for sb in at.selectbox if sb.label == "支援総額（上限）"][0]
+        at = min_box.set_value("500万円以上").run()
+        at = max_box.set_value("500万円以下").run()
+        search_btn = [b for b in at.button if "検索する" in b.label][0]
+        at = search_btn.click().run()
+    finally:
+        kd.run_discovery = original
+
+    assert not at.exception, str(at.exception)
+    assert "下限が上限を超えています" not in _text(at)
+    assert "テスト商品" in _text(at)
+
+
+def test_category_and_amount_passed_through_to_run_discovery():
+    calls = []
+
+    def _fake(client, keyword, statuses, **kwargs):
+        calls.append(kwargs)
+        return _fake_result_with_one_live_product()
+
+    original = kd.run_discovery
+    kd.run_discovery = _fake
+    try:
+        at = _goto_discover(_app())
+        category_box = at.selectbox[0]
+        at = category_box.set_value("Technology").run()
+        min_box = [sb for sb in at.selectbox if sb.label == "支援総額（下限）"][0]
+        at = min_box.set_value("500万円以上").run()
+        search_btn = [b for b in at.button if "検索する" in b.label][0]
+        at = search_btn.click().run()
+    finally:
+        kd.run_discovery = original
+
+    assert not at.exception, str(at.exception)
+    assert calls[0]["category"] == "Technology"
+    assert calls[0]["min_yen"] == 5_000_000
+    assert calls[0]["max_yen"] is None
+
+
+def _fake_result_with_condition_mismatches() -> kd.DiscoveryResult:
+    result = _fake_result_with_one_live_product()
+    off = kd.Product(name="状態不一致商品", url="https://www.kickstarter.com/projects/x/off",
+                     status=kd.STATUS_ENDED, exclusion_reason="状態が検索条件と不一致（検出: 終了済み）")
+    cat_unknown = kd.Product(name="カテゴリー不明商品",
+                             url="https://www.kickstarter.com/projects/x/catunk",
+                             status=kd.STATUS_LIVE, exclusion_reason="カテゴリーを確認できない")
+    amt_unknown = kd.Product(name="金額不明商品",
+                             url="https://www.kickstarter.com/projects/x/amtunk",
+                             status=kd.STATUS_LIVE, exclusion_reason="為替レート取得失敗")
+    result.off_selection = [off]
+    result.category_unknown = [cat_unknown]
+    result.amount_unknown = [amt_unknown]
+    result.candidate_count = 4
+    result.fetch_success_count = 4
+    result.matched_count = 1
+    result.off_condition_count = 1
+    result.category_unknown_count = 1
+    result.amount_unknown_count = 1
+    return result
+
+
+def test_summary_counts_are_displayed():
+    original = kd.run_discovery
+    kd.run_discovery = lambda client, keyword, statuses, **kwargs: \
+        _fake_result_with_condition_mismatches()
+    try:
+        at = _goto_discover(_app())
+        at.text_input[0].set_value("アウトドア調理器具").run()
+        search_btn = [b for b in at.button if "検索する" in b.label][0]
+        at = search_btn.click().run()
+    finally:
+        kd.run_discovery = original
+
+    assert not at.exception, str(at.exception)
+    labels = {m.label: m.value for m in at.metric}
+    assert labels.get("取得候補数") == "4"
+    assert labels.get("個別ページ取得成功数") == "4"
+    assert labels.get("条件一致数") == "1"
+    assert labels.get("条件外の商品数") == "1"
+    assert labels.get("カテゴリー判定不能数") == "1"
+    assert labels.get("金額判定不能数") == "1"
+
+
+def test_condition_mismatch_products_shown_in_dedicated_expander_with_reason():
+    original = kd.run_discovery
+    kd.run_discovery = lambda client, keyword, statuses, **kwargs: \
+        _fake_result_with_condition_mismatches()
+    try:
+        at = _goto_discover(_app())
+        at.text_input[0].set_value("アウトドア調理器具").run()
+        search_btn = [b for b in at.button if "検索する" in b.label][0]
+        at = search_btn.click().run()
+    finally:
+        kd.run_discovery = original
+
+    assert not at.exception, str(at.exception)
+    expander_labels = [e.label for e in at.expander]
+    assert any("条件外・判定不能の商品を確認" in lbl for lbl in expander_labels)
+    body = _text(at)
+    assert "状態不一致商品" in body
+    assert "カテゴリー不明商品" in body
+    assert "金額不明商品" in body
+    assert "状態が検索条件と不一致" in body
+    assert "カテゴリーを確認できない" in body
+
+
+# ── ログアウト時の新規stateクリア（カテゴリー・金額）────────────────────────────
+
+def test_logout_clears_category_and_amount_selection_state():
+    original = kd.run_discovery
+    kd.run_discovery = lambda client, keyword, statuses, **kwargs: \
+        _fake_result_with_one_live_product()
+    try:
+        at = _goto_discover(_app())
+        category_box = at.selectbox[0]
+        at = category_box.set_value("Technology").run()
+        min_box = [sb for sb in at.selectbox if sb.label == "支援総額（下限）"][0]
+        at = min_box.set_value("500万円以上").run()
+        search_btn = [b for b in at.button if "検索する" in b.label][0]
+        at = search_btn.click().run()
+    finally:
+        kd.run_discovery = original
+
+    for key in (kdui.CATEGORY_SELECT, kdui.AMOUNT_MIN_SELECT, kdui.AMOUNT_MAX_SELECT,
+               kdui.LAST_CATEGORY, kdui.LAST_MIN_YEN, kdui.LAST_MAX_YEN):
+        assert key in at.session_state.filtered_state, f"{key} が無い（事前確認）"
+
+    logout = [b for b in at.button if "ログアウト" in b.label][0]
+    at = logout.click().run()
+    assert not at.exception, str(at.exception)
+    for key in (kdui.CATEGORY_SELECT, kdui.AMOUNT_MIN_SELECT, kdui.AMOUNT_MAX_SELECT,
+               kdui.LAST_CATEGORY, kdui.LAST_MIN_YEN, kdui.LAST_MAX_YEN):
+        assert key not in at.session_state.filtered_state, f"{key} が残っている"
+
+
 if __name__ == "__main__":
     sys.exit(run(dict(globals()), "「商品を探す」画面テスト（外部通信なし）"))
