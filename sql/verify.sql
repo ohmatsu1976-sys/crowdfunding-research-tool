@@ -532,6 +532,413 @@ with checks as (
           where schemaname='public' and tablename='sender_profiles'
             and indexname='sender_profiles_one_default_per_user') = 1,
         null
+
+    -- ═══ 0007〜0009 案件管理（第1段階「返信獲得」）の検査 ═══════════════════
+    -- ── 34. cases/case_events/case_targetsの3テーブルが存在する ──────────────
+    union all
+    select 110, 'cases/case_events/case_targetsの3テーブルが存在する', '3',
+        (select count(*) from (values
+            (to_regclass('public.cases')), (to_regclass('public.case_events')),
+            (to_regclass('public.case_targets'))
+        ) t(oid) where oid is not null)::text,
+        (select count(*) from (values
+            (to_regclass('public.cases')), (to_regclass('public.case_events')),
+            (to_regclass('public.case_targets'))
+        ) t(oid) where oid is not null) = 3,
+        null
+
+    -- ── 35. 3テーブルすべてでRLSが有効 ──────────────────────────────────────
+    union all
+    select 111, '3テーブルすべてでRLSが有効', '3',
+        (select count(*) from pg_class
+          where oid = any(array[to_regclass('public.cases'), to_regclass('public.case_events'),
+                                to_regclass('public.case_targets')])
+            and relrowsecurity)::text,
+        (select count(*) from pg_class
+          where oid = any(array[to_regclass('public.cases'), to_regclass('public.case_events'),
+                                to_regclass('public.case_targets')])
+            and relrowsecurity) = 3,
+        null
+
+    -- ── 36〜38. ポリシー数 ───────────────────────────────────────────────────
+    union all
+    select 112, 'casesのポリシー数', '3',
+        (select count(*) from pg_policies where schemaname='public' and tablename='cases')::text,
+        (select count(*) from pg_policies where schemaname='public' and tablename='cases') = 3,
+        null
+    union all
+    select 113, 'case_eventsのポリシー数', '1',
+        (select count(*) from pg_policies where schemaname='public' and tablename='case_events')::text,
+        (select count(*) from pg_policies where schemaname='public' and tablename='case_events') = 1,
+        null
+    union all
+    select 114, 'case_targetsのポリシー数', '4',
+        (select count(*) from pg_policies where schemaname='public' and tablename='case_targets')::text,
+        (select count(*) from pg_policies where schemaname='public' and tablename='case_targets') = 4,
+        null
+
+    -- ── 39. casesにINSERTポリシーが0件（create_case_from_candidate()経由のみ）
+    union all
+    select 115, 'casesにINSERTポリシーが0件', '0',
+        (select count(*) from pg_policies
+          where schemaname='public' and tablename='cases' and cmd='INSERT')::text,
+        (select count(*) from pg_policies
+          where schemaname='public' and tablename='cases' and cmd='INSERT') = 0,
+        null
+
+    -- ── 40. case_eventsにINSERT/UPDATE/DELETEポリシーが0件（RPC経由のみ）─────
+    union all
+    select 116, 'case_eventsにINSERT/UPDATE/DELETEポリシーが0件', '0',
+        (select count(*) from pg_policies
+          where schemaname='public' and tablename='case_events'
+            and cmd in ('INSERT','UPDATE','DELETE'))::text,
+        (select count(*) from pg_policies
+          where schemaname='public' and tablename='case_events'
+            and cmd in ('INSERT','UPDATE','DELETE')) = 0,
+        null
+
+    -- ── 41. anonが3テーブルのSELECT/INSERT/UPDATE/DELETEを一切持たない ───────
+    union all
+    select 117, 'anonがcases/case_events/case_targetsの権限を一切持たない', '0',
+        (select count(*) from (values
+            (has_table_privilege('anon','public.cases','SELECT')),
+            (has_table_privilege('anon','public.cases','INSERT')),
+            (has_table_privilege('anon','public.cases','UPDATE')),
+            (has_table_privilege('anon','public.cases','DELETE')),
+            (has_table_privilege('anon','public.case_events','SELECT')),
+            (has_table_privilege('anon','public.case_events','INSERT')),
+            (has_table_privilege('anon','public.case_events','UPDATE')),
+            (has_table_privilege('anon','public.case_events','DELETE')),
+            (has_table_privilege('anon','public.case_targets','SELECT')),
+            (has_table_privilege('anon','public.case_targets','INSERT')),
+            (has_table_privilege('anon','public.case_targets','UPDATE')),
+            (has_table_privilege('anon','public.case_targets','DELETE'))
+        ) t(v) where v)::text,
+        (select count(*) from (values
+            (has_table_privilege('anon','public.cases','SELECT')),
+            (has_table_privilege('anon','public.cases','INSERT')),
+            (has_table_privilege('anon','public.cases','UPDATE')),
+            (has_table_privilege('anon','public.cases','DELETE')),
+            (has_table_privilege('anon','public.case_events','SELECT')),
+            (has_table_privilege('anon','public.case_events','INSERT')),
+            (has_table_privilege('anon','public.case_events','UPDATE')),
+            (has_table_privilege('anon','public.case_events','DELETE')),
+            (has_table_privilege('anon','public.case_targets','SELECT')),
+            (has_table_privilege('anon','public.case_targets','INSERT')),
+            (has_table_privilege('anon','public.case_targets','UPDATE')),
+            (has_table_privilege('anon','public.case_targets','DELETE'))
+        ) t(v) where v) = 0,
+        null
+
+    -- ── 42. authenticatedがcasesへ直接INSERTできない ─────────────────────────
+    union all
+    select 118, 'authenticatedがcasesへ直接INSERTできない', 'false',
+        has_table_privilege('authenticated','public.cases','INSERT')::text,
+        not has_table_privilege('authenticated','public.cases','INSERT'),
+        null
+
+    -- ── 43. authenticatedがcase_eventsへ直接INSERT/UPDATE/DELETEできない ─────
+    union all
+    select 119, 'authenticatedがcase_eventsへ直接INSERT/UPDATE/DELETEできない', '0',
+        (select count(*) from (values
+            (has_table_privilege('authenticated','public.case_events','INSERT')),
+            (has_table_privilege('authenticated','public.case_events','UPDATE')),
+            (has_table_privilege('authenticated','public.case_events','DELETE'))
+        ) t(v) where v)::text,
+        (select count(*) from (values
+            (has_table_privilege('authenticated','public.case_events','INSERT')),
+            (has_table_privilege('authenticated','public.case_events','UPDATE')),
+            (has_table_privilege('authenticated','public.case_events','DELETE'))
+        ) t(v) where v) = 0,
+        null
+
+    -- ── 44. casesで更新できるのはmemo/next_action_at/next_action_label/
+    --        archived/primary_channelの5つだけ ─────────────────────────────────
+    union all
+    select 120, 'casesで更新できるのはmemo/next_action_at/next_action_label/archived/primary_channelだけ',
+        'memo,next_action_at,next_action_label,archived,primary_channel',
+        concat_ws(',',
+            case when has_column_privilege('authenticated','public.cases','memo','UPDATE')
+                 then 'memo' end,
+            case when has_column_privilege('authenticated','public.cases','next_action_at','UPDATE')
+                 then 'next_action_at' end,
+            case when has_column_privilege('authenticated','public.cases','next_action_label','UPDATE')
+                 then 'next_action_label' end,
+            case when has_column_privilege('authenticated','public.cases','archived','UPDATE')
+                 then 'archived' end,
+            case when has_column_privilege('authenticated','public.cases','primary_channel','UPDATE')
+                 then 'primary_channel' end,
+            case when has_column_privilege('authenticated','public.cases','status','UPDATE')
+                 then 'status(想定外)' end,
+            case when has_column_privilege('authenticated','public.cases','has_reply','UPDATE')
+                 then 'has_reply(想定外)' end,
+            case when has_column_privilege('authenticated','public.cases','first_sent_at','UPDATE')
+                 then 'first_sent_at(想定外)' end,
+            case when has_column_privilege('authenticated','public.cases','last_reply_at','UPDATE')
+                 then 'last_reply_at(想定外)' end,
+            case when has_column_privilege('authenticated','public.cases','advanced_at','UPDATE')
+                 then 'advanced_at(想定外)' end,
+            case when has_column_privilege('authenticated','public.cases','user_id','UPDATE')
+                 then 'user_id(想定外)' end,
+            case when has_column_privilege('authenticated','public.cases','product_id','UPDATE')
+                 then 'product_id(想定外)' end
+        ),
+        concat_ws(',',
+            case when has_column_privilege('authenticated','public.cases','memo','UPDATE')
+                 then 'memo' end,
+            case when has_column_privilege('authenticated','public.cases','next_action_at','UPDATE')
+                 then 'next_action_at' end,
+            case when has_column_privilege('authenticated','public.cases','next_action_label','UPDATE')
+                 then 'next_action_label' end,
+            case when has_column_privilege('authenticated','public.cases','archived','UPDATE')
+                 then 'archived' end,
+            case when has_column_privilege('authenticated','public.cases','primary_channel','UPDATE')
+                 then 'primary_channel' end,
+            case when has_column_privilege('authenticated','public.cases','status','UPDATE')
+                 then 'status(想定外)' end,
+            case when has_column_privilege('authenticated','public.cases','has_reply','UPDATE')
+                 then 'has_reply(想定外)' end,
+            case when has_column_privilege('authenticated','public.cases','first_sent_at','UPDATE')
+                 then 'first_sent_at(想定外)' end,
+            case when has_column_privilege('authenticated','public.cases','last_reply_at','UPDATE')
+                 then 'last_reply_at(想定外)' end,
+            case when has_column_privilege('authenticated','public.cases','advanced_at','UPDATE')
+                 then 'advanced_at(想定外)' end,
+            case when has_column_privilege('authenticated','public.cases','user_id','UPDATE')
+                 then 'user_id(想定外)' end,
+            case when has_column_privilege('authenticated','public.cases','product_id','UPDATE')
+                 then 'product_id(想定外)' end
+        ) = 'memo,next_action_at,next_action_label,archived,primary_channel',
+        null
+
+    -- ── 45. case_targetsで更新できるのはapproach_target/reply_targetだけ ─────
+    union all
+    select 121, 'case_targetsで更新できるのはapproach_target/reply_targetだけ',
+        'approach_target,reply_target',
+        concat_ws(',',
+            case when has_column_privilege('authenticated','public.case_targets','approach_target','UPDATE')
+                 then 'approach_target' end,
+            case when has_column_privilege('authenticated','public.case_targets','reply_target','UPDATE')
+                 then 'reply_target' end,
+            case when has_column_privilege('authenticated','public.case_targets','user_id','UPDATE')
+                 then 'user_id(想定外)' end,
+            case when has_column_privilege('authenticated','public.case_targets','target_month','UPDATE')
+                 then 'target_month(想定外)' end,
+            case when has_column_privilege('authenticated','public.case_targets','updated_at','UPDATE')
+                 then 'updated_at(想定外)' end
+        ),
+        concat_ws(',',
+            case when has_column_privilege('authenticated','public.case_targets','approach_target','UPDATE')
+                 then 'approach_target' end,
+            case when has_column_privilege('authenticated','public.case_targets','reply_target','UPDATE')
+                 then 'reply_target' end,
+            case when has_column_privilege('authenticated','public.case_targets','user_id','UPDATE')
+                 then 'user_id(想定外)' end,
+            case when has_column_privilege('authenticated','public.case_targets','target_month','UPDATE')
+                 then 'target_month(想定外)' end,
+            case when has_column_privilege('authenticated','public.case_targets','updated_at','UPDATE')
+                 then 'updated_at(想定外)' end
+        ) = 'approach_target,reply_target',
+        null
+
+    -- ── 46. authenticatedが実行できるのは新規6RPCだけ ────────────────────────
+    union all
+    select 122, 'authenticatedが実行できるのは案件管理の新規6RPCだけ',
+        'create_case_from_candidate,log_case_event,void_case_event,correct_case_event,redact_case_event,save_ai_assist_result',
+        concat_ws(',',
+            case when has_function_privilege('authenticated',
+                      'public.create_case_from_candidate(uuid)','EXECUTE')
+                 then 'create_case_from_candidate' end,
+            case when has_function_privilege('authenticated',
+                      'public.log_case_event(uuid,text,text,text,timestamptz,text,text,text)','EXECUTE')
+                 then 'log_case_event' end,
+            case when has_function_privilege('authenticated',
+                      'public.void_case_event(uuid,text)','EXECUTE')
+                 then 'void_case_event' end,
+            case when has_function_privilege('authenticated',
+                      'public.correct_case_event(uuid,text,text)','EXECUTE')
+                 then 'correct_case_event' end,
+            case when has_function_privilege('authenticated',
+                      'public.redact_case_event(uuid)','EXECUTE')
+                 then 'redact_case_event' end,
+            case when has_function_privilege('authenticated',
+                      'public.save_ai_assist_result(uuid,jsonb)','EXECUTE')
+                 then 'save_ai_assist_result' end,
+            case when has_function_privilege('authenticated',
+                      'public._case_apply_event(text,text,text,timestamptz)','EXECUTE')
+                 then '_case_apply_event(想定外)' end,
+            case when has_function_privilege('authenticated',
+                      'public._case_recompute(uuid)','EXECUTE')
+                 then '_case_recompute(想定外)' end
+        ),
+        concat_ws(',',
+            case when has_function_privilege('authenticated',
+                      'public.create_case_from_candidate(uuid)','EXECUTE')
+                 then 'create_case_from_candidate' end,
+            case when has_function_privilege('authenticated',
+                      'public.log_case_event(uuid,text,text,text,timestamptz,text,text,text)','EXECUTE')
+                 then 'log_case_event' end,
+            case when has_function_privilege('authenticated',
+                      'public.void_case_event(uuid,text)','EXECUTE')
+                 then 'void_case_event' end,
+            case when has_function_privilege('authenticated',
+                      'public.correct_case_event(uuid,text,text)','EXECUTE')
+                 then 'correct_case_event' end,
+            case when has_function_privilege('authenticated',
+                      'public.redact_case_event(uuid)','EXECUTE')
+                 then 'redact_case_event' end,
+            case when has_function_privilege('authenticated',
+                      'public.save_ai_assist_result(uuid,jsonb)','EXECUTE')
+                 then 'save_ai_assist_result' end,
+            case when has_function_privilege('authenticated',
+                      'public._case_apply_event(text,text,text,timestamptz)','EXECUTE')
+                 then '_case_apply_event(想定外)' end,
+            case when has_function_privilege('authenticated',
+                      'public._case_recompute(uuid)','EXECUTE')
+                 then '_case_recompute(想定外)' end
+        ) = 'create_case_from_candidate,log_case_event,void_case_event,correct_case_event,redact_case_event,save_ai_assist_result',
+        null
+
+    -- ── 47. 内部専用の_case_apply_event/_case_recomputeをauthenticatedが
+    --        実行できない ───────────────────────────────────────────────────
+    union all
+    select 123, '内部専用の2関数をauthenticatedが実行できない', '0',
+        (select count(*) from (values
+            (has_function_privilege('authenticated',
+                'public._case_apply_event(text,text,text,timestamptz)','EXECUTE')),
+            (has_function_privilege('authenticated','public._case_recompute(uuid)','EXECUTE'))
+        ) t(v) where v)::text,
+        (select count(*) from (values
+            (has_function_privilege('authenticated',
+                'public._case_apply_event(text,text,text,timestamptz)','EXECUTE')),
+            (has_function_privilege('authenticated','public._case_recompute(uuid)','EXECUTE'))
+        ) t(v) where v) = 0,
+        null
+
+    -- ── 48. anonが案件管理の新規関数（公開6＋内部2）のいずれも実行できない ───
+    union all
+    select 124, 'anonが案件管理の新規関数のいずれも実行できない', '0',
+        (select count(*) from (values
+            (has_function_privilege('anon','public.create_case_from_candidate(uuid)','EXECUTE')),
+            (has_function_privilege('anon',
+                'public.log_case_event(uuid,text,text,text,timestamptz,text,text,text)','EXECUTE')),
+            (has_function_privilege('anon','public.void_case_event(uuid,text)','EXECUTE')),
+            (has_function_privilege('anon','public.correct_case_event(uuid,text,text)','EXECUTE')),
+            (has_function_privilege('anon','public.redact_case_event(uuid)','EXECUTE')),
+            (has_function_privilege('anon','public.save_ai_assist_result(uuid,jsonb)','EXECUTE')),
+            (has_function_privilege('anon',
+                'public._case_apply_event(text,text,text,timestamptz)','EXECUTE')),
+            (has_function_privilege('anon','public._case_recompute(uuid)','EXECUTE'))
+        ) t(v) where v)::text,
+        (select count(*) from (values
+            (has_function_privilege('anon','public.create_case_from_candidate(uuid)','EXECUTE')),
+            (has_function_privilege('anon',
+                'public.log_case_event(uuid,text,text,text,timestamptz,text,text,text)','EXECUTE')),
+            (has_function_privilege('anon','public.void_case_event(uuid,text)','EXECUTE')),
+            (has_function_privilege('anon','public.correct_case_event(uuid,text,text)','EXECUTE')),
+            (has_function_privilege('anon','public.redact_case_event(uuid)','EXECUTE')),
+            (has_function_privilege('anon','public.save_ai_assist_result(uuid,jsonb)','EXECUTE')),
+            (has_function_privilege('anon',
+                'public._case_apply_event(text,text,text,timestamptz)','EXECUTE')),
+            (has_function_privilege('anon','public._case_recompute(uuid)','EXECUTE'))
+        ) t(v) where v) = 0,
+        null
+
+    -- ── 49. 公開6RPCすべてがSECURITY DEFINER ─────────────────────────────────
+    union all
+    select 125, '案件管理の公開6RPCすべてがSECURITY DEFINER', '6',
+        (select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+          where n.nspname='public' and p.prosecdef
+            and p.proname in ('create_case_from_candidate','log_case_event','void_case_event',
+                              'correct_case_event','redact_case_event','save_ai_assist_result'))::text,
+        (select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+          where n.nspname='public' and p.prosecdef
+            and p.proname in ('create_case_from_candidate','log_case_event','void_case_event',
+                              'correct_case_event','redact_case_event','save_ai_assist_result')) = 6,
+        null
+
+    -- ── 50. 公開6RPCすべてでsearch_pathが固定されている ──────────────────────
+    union all
+    select 126, '案件管理の公開6RPCすべてでsearch_pathが固定されている', '6',
+        (select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+          where n.nspname='public'
+            and p.proname in ('create_case_from_candidate','log_case_event','void_case_event',
+                              'correct_case_event','redact_case_event','save_ai_assist_result')
+            and exists (select 1 from unnest(coalesce(p.proconfig,'{}'::text[])) cfg
+                         where cfg like 'search_path=%'))::text,
+        (select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+          where n.nspname='public'
+            and p.proname in ('create_case_from_candidate','log_case_event','void_case_event',
+                              'correct_case_event','redact_case_event','save_ai_assist_result')
+            and exists (select 1 from unnest(coalesce(p.proconfig,'{}'::text[])) cfg
+                         where cfg like 'search_path=%')) = 6,
+        null
+
+    -- ── 51. cases/case_targetsのupdated_at自動更新トリガーが2本存在する ─────
+    union all
+    select 127, 'cases/case_targetsのupdated_at自動更新トリガーが2本存在する', '2',
+        (select count(*) from pg_trigger
+          where not tgisinternal
+            and tgname in ('cases_set_updated_at', 'case_targets_set_updated_at'))::text,
+        (select count(*) from pg_trigger
+          where not tgisinternal
+            and tgname in ('cases_set_updated_at', 'case_targets_set_updated_at')) = 2,
+        null
+
+    -- ── 52. casesに(user_id,product_id)の一意制約がある ──────────────────────
+    union all
+    select 128, 'casesに(user_id,product_id)の一意制約がある', 'true',
+        ((select count(*) from pg_constraint where conname = 'cases_user_product_unique') = 1)::text,
+        (select count(*) from pg_constraint where conname = 'cases_user_product_unique') = 1,
+        null
+
+    -- ── 53. case_targetsの主キーが存在する（user_id,target_month）────────────
+    union all
+    select 129, 'case_targetsに主キー制約が存在する', 'true',
+        ((select count(*) from pg_constraint
+           where conrelid = to_regclass('public.case_targets') and contype = 'p') = 1)::text,
+        (select count(*) from pg_constraint
+          where conrelid = to_regclass('public.case_targets') and contype = 'p') = 1,
+        null
+
+    -- ── 54. case_eventsにvoided_at/redacted_at/ai_assist列が存在する ─────────
+    --        （訂正・伏せ字化・取消しの構造が実際に存在することの確認）
+    union all
+    select 130, 'case_eventsにvoided_at/redacted_at/ai_assist列が存在する', '3',
+        (select count(*) from pg_attribute
+          where attrelid = to_regclass('public.case_events')
+            and attname in ('voided_at', 'redacted_at', 'ai_assist')
+            and not attisdropped)::text,
+        (select count(*) from pg_attribute
+          where attrelid = to_regclass('public.case_events')
+            and attname in ('voided_at', 'redacted_at', 'ai_assist')
+            and not attisdropped) = 3,
+        null
+
+    -- ── 55. case_targetsのapproach_target/reply_targetに範囲チェック制約がある
+    union all
+    select 131, 'case_targetsのapproach_target/reply_targetに範囲チェック制約がある', '2',
+        (select count(*) from pg_constraint
+          where conname in ('case_targets_approach_ok', 'case_targets_reply_ok'))::text,
+        (select count(*) from pg_constraint
+          where conname in ('case_targets_approach_ok', 'case_targets_reply_ok')) = 2,
+        null
+
+    -- ── 56. 案件管理の新規6RPCがいずれもuser_idを引数に取らない ──────────────
+    --        （保存者・操作対象は常にauth.uid()で決まり、引数では指定できない）
+    union all
+    select 132, '案件管理の新規6RPCがいずれもuser_idを引数に取らない', '6',
+        (select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+          where n.nspname='public'
+            and p.proname in ('create_case_from_candidate','log_case_event','void_case_event',
+                              'correct_case_event','redact_case_event','save_ai_assist_result')
+            and not (coalesce(p.proargnames, '{}'::text[]) && array['user_id','p_user_id']))::text,
+        (select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+          where n.nspname='public'
+            and p.proname in ('create_case_from_candidate','log_case_event','void_case_event',
+                              'correct_case_event','redact_case_event','save_ai_assist_result')
+            and not (coalesce(p.proargnames, '{}'::text[]) && array['user_id','p_user_id'])) = 6,
+        null
 )
 
 -- ── 総合結果（すべての行のok列を一括確認する用）─────────────────────────────

@@ -16,6 +16,8 @@ python tests/test_sql_migrations.py # SQLマイグレーションの静的テス
 python tests/test_candidates.py    # 候補保存（save_candidate RPC・偽クライアント）
 python tests/test_summit.py        # サミット特典モード（制限版画面・偽関数）
 python tests/test_sender_profiles.py # 送信者プロフィール（偽クライアント）
+python tests/test_cases_sql_migrations.py # 案件管理（0007〜0009）のSQL静的テスト
+python tests/test_cases.py         # 案件管理（第1段階「返信獲得」）のデータ層（偽クライアント）
 python tests/test_network.py       # 外部サイトへ実アクセスする
 ```
 
@@ -37,6 +39,8 @@ python tests/test_network.py       # 外部サイトへ実アクセスする
 | `test_candidates.py` | なし（決定論的） | **コードの不具合**。必ず直す |
 | `test_summit.py` | なし（決定論的） | **コードの不具合**。必ず直す |
 | `test_sender_profiles.py` | なし（決定論的） | **コードの不具合**。必ず直す |
+| `test_cases_sql_migrations.py` | なし（決定論的・DB接続なし） | **SQLの不具合**。RLS・状態機械が実際に効くかはフェーズ3Eの実データテストで別途確認する |
+| `test_cases.py` | なし（決定論的） | **コードの不具合**。必ず直す |
 | `test_network.py` | 外部サイトの状態 | 掲載終了・仕様変更・IPブロックの可能性がある。コードの不具合とは限らないため、まず原因を切り分ける |
 
 `test_app_render.py` は Streamlit 同梱の `st.testing.v1.AppTest` を使う。
@@ -108,6 +112,21 @@ python tests/test_network.py       # 外部サイトへ実アクセスする
   画面切替の下見と同じ理由でauth.apply_session()を使わない非破壊な
   セッション設定、0006_sender_profiles.sqlの全CREATE文がガード付きで複数回
   実行しても壊れないことの静的検査）
+
+- **案件管理・第1段階「返信獲得」**（`cases`/`case_events`/`case_targets`のSQL静的検査：
+  RLS・列単位GRANT・`anon`に権限が無いこと・公開6RPCが`user_id`を引数に取らないこと・
+  本人確認の条件句・重複フォロー防止とイベント種別ごとの遷移条件の構造的な証拠・
+  取消し時に`_case_recompute()`で再計算し例外を握りつぶさないこと・伏せ字化で
+  `ai_assist`も消えること・二重クリックでの案件重複防止。`cases.py`のオフライン
+  テスト：JST日付計算（UTC→JSTの月境界をまたぐケースを含む）、連絡先候補からの
+  優先チャネル決定（既存`contact_info.resolve_priority()`の再利用）、RPCの
+  戻り値・例外（`invalid_transition`を含む）の安全な文言への変換、月間目標の
+  月別upsert・負数/上限のクランプ、ダッシュボード集計（送信数は案件数で数える、
+  返信はコホート方式で初回送信月の実績に反映、商談移行数は`advanced_at`で独立に
+  数える）、今日やることの優先順位（`awaiting_our_reply`→期限超過フォロー→
+  本日期限フォロー→未送信→手動リマインダーの順、同順位は期限→作成日時の古い順、
+  最大5件、アーカイブ済み・終了状態の除外）。AI支援結果はまだAI APIを呼び出さず、
+  固定スキーマの検証と保存RPCの制約だけを検証する）
 
 ## 補足
 
