@@ -18,6 +18,7 @@ python tests/test_summit.py        # サミット特典モード（制限版画�
 python tests/test_sender_profiles.py # 送信者プロフィール（偽クライアント）
 python tests/test_cases_sql_migrations.py # 案件管理（0007〜0009）のSQL静的テスト
 python tests/test_cases.py         # 案件管理（第1段階「返信獲得」）のデータ層（偽クライアント）
+python tests/test_approach_messages.py # 初回アプローチ文面のチャネル別テンプレート生成（決定論的・AI不使用）
 python tests/test_import_order.py  # 画面モジュール間のimport順序に依存しないこと（起動不能の再発防止）
 python tests/test_network.py       # 外部サイトへ実アクセスする
 ```
@@ -42,6 +43,7 @@ python tests/test_network.py       # 外部サイトへ実アクセスする
 | `test_sender_profiles.py` | なし（決定論的） | **コードの不具合**。必ず直す |
 | `test_cases_sql_migrations.py` | なし（決定論的・DB接続なし） | **SQLの不具合**。RLS・状態機械が実際に効くかはフェーズ3Eの実データテストで別途確認する |
 | `test_cases.py` | なし（決定論的） | **コードの不具合**。必ず直す |
+| `test_approach_messages.py` | なし（決定論的・AI API不使用） | **コードの不具合**。必ず直す |
 | `test_import_order.py` | なし（サブプロセスを起動するが外部通信はしない） | **起動不能になる不具合**。画面モジュール間で互いをimportする構造に戻していないか確認する |
 | `test_network.py` | 外部サイトの状態 | 掲載終了・仕様変更・IPブロックの可能性がある。コードの不具合とは限らないため、まず原因を切り分ける |
 
@@ -137,6 +139,23 @@ python tests/test_network.py       # 外部サイトへ実アクセスする
   出る操作（初回送信／フォローアップ／返信受信／こちらの返信／状態変更）が
   `log_case_event`RPCを正しい引数で呼ぶこと、取消し済みイベントが履歴に出ない
   こと、月間目標の保存、ログアウトでcase_状態が消えること
+
+- **初回アプローチ文面（`approach_messages.py`）**：AI APIを一切使わず決定論的な
+  テンプレートだけで文面（件名・本文）を組み立てること、連絡チャネル（メール／
+  公式サイト／問い合わせフォーム／掲載ページ／連絡先未確定は正式な長文＋件名、
+  Instagram／Facebookは件名なしの短文DM、LinkedInは件名なしだが宛名ありの
+  短文）で書式が分かれること、メーカー名が「不明」や空のときに英文の宛名
+  （Dear ... Team,）へ混入させないこと、送信者名が無い場合は[Your Name]の
+  プレースホルダで文面が壊れないこと、会社名の有無で自己紹介・署名に空行や
+  余分な文言が残らないこと、未知のチャネル値でも例外を出さず汎用文面に
+  フォールバックすること、商品名が空でも汎用的な言い回しで埋めること。
+  画面（`cases_ui.py`）：未送信（`not_contacted`）の案件詳細に文面案を
+  チャネル別に表示し利用者が編集・コピーできること、「初回メッセージを
+  送信した」ボタンは送信事実を**記録するだけ**（この画面からは送信しない）
+  だと明示する注記があること、既存の送信者プロフィール（`sender_profiles.py`）
+  を読んで文面に反映すること（登録・編集・削除はしない）、サミット特典版には
+  表示されないこと（案件管理そのものが非表示のため）、既存の状態遷移・RPC・
+  RLS・SQLは無変更であること。
 
 - **画面モジュール間のimport順序**（`ui_state_keys.py`・`test_import_order.py`）：
   `candidates_ui.py`（画面切替）と`cases_ui.py`（案件管理）は、共有する

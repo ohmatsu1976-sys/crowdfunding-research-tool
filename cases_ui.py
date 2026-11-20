@@ -15,8 +15,10 @@ from datetime import date as _date
 
 import streamlit as st
 
+import approach_messages
 import auth
 import cases
+import sender_profiles as sp
 # 画面切替・案件管理との受け渡しキーは、依存の無い共通モジュールが正本
 # （candidates_ui.pyを直接importしない。以前はここでcandidates_ui.pyの
 #  属性をモジュール読み込み時に参照しており、初期化順序によって
@@ -233,6 +235,40 @@ def _recipient_default(case: cases.Case) -> str:
     return info.get("email") or info.get("url") or ""
 
 
+_SENDER_PROFILE_SELECT_KEY = "case_sender_profile_id"
+
+
+def _pick_sender_profile(client, user_id: str) -> tuple:
+    """初回アプローチ文面に使う送信者名・会社名を選ぶ（氏名, 会社名）
+
+    登録・編集・削除はしない（それは商品リサーチ画面のsender_profiles_ui.pyの
+    管理UIが担う）。ここでは既存の送信者プロフィールを読んで使うだけ。
+    複数件ある場合だけ、選び直せる小さなプルダウンを出す
+    （sender_profiles.pick_auto_selected()と同じ基準で既定を選ぶ）。
+    """
+    profiles = sp.list_profiles(client, user_id) or []
+    if not profiles:
+        st.caption(
+            "💡 送信者プロフィールが未登録のため、文面の氏名は仮の表記のままです。"
+            "商品リサーチ画面の「📝 送信者プロフィール」から登録すると、ここにも反映されます。"
+        )
+        return "", ""
+    if len(profiles) == 1:
+        return profiles[0].sender_name_en, profiles[0].company_name_en
+
+    by_id = {p.id: p for p in profiles}
+    if st.session_state.get(_SENDER_PROFILE_SELECT_KEY) not in by_id:
+        auto = sp.pick_auto_selected(profiles)
+        st.session_state[_SENDER_PROFILE_SELECT_KEY] = auto.id if auto else profiles[0].id
+    st.selectbox(
+        "差出人プロフィール", list(by_id.keys()),
+        format_func=lambda pid: by_id[pid].label,
+        key=_SENDER_PROFILE_SELECT_KEY,
+    )
+    chosen = by_id.get(st.session_state.get(_SENDER_PROFILE_SELECT_KEY))
+    return (chosen.sender_name_en, chosen.company_name_en) if chosen else ("", "")
+
+
 def _render_detail(client, user_id: str, case: cases.Case) -> None:
     if st.button("← 案件一覧に戻る"):
         st.session_state[uikeys.SELECTED_CASE_ID] = ""
@@ -295,17 +331,47 @@ def _render_primary_action(client, user_id: str, case: cases.Case) -> None:
     status = case.status
 
     if status == cases.STATUS_NOT_CONTACTED:
+        channel = st.selectbox(
+            "連絡チャネル", cases.CHANNEL_OPTIONS,
+            index=(cases.CHANNEL_OPTIONS.index(case.primary_channel)
+                  if case.primary_channel in cases.CHANNEL_OPTIONS else 0),
+            format_func=lambda c: _CHANNEL_LABELS_JA.get(c, c),
+            key=f"case_channel_{case.id}")
+
+        sender_name, sender_company = _pick_sender_profile(client, user_id)
+        draft = approach_messages.build_approach_message(
+            product_name=case.product_name, maker_name=case.maker_name,
+            channel=channel, sender_name=sender_name, sender_company=sender_company,
+        )
+        subject_key = f"case_subject_{case.id}_{channel}"
+        body_key = f"case_body_{case.id}_{channel}"
+        with st.expander("✉️ 初回メッセージの文面案（チャネル別・編集・コピー可）", expanded=True):
+            st.caption(
+                "決定論的なテンプレートから自動生成した文面案です（AIは使用していません）。"
+                "内容を確認・編集してから、お使いのメールソフトやSNS等からご自身で送信してください。"
+                "この画面から送信は行われません。"
+            )
+            st.caption(draft.usage_note)
+            if draft.uses_subject:
+                st.text_input("件名", value=draft.subject, key=subject_key)
+            st.text_area("本文", value=draft.body, height=260, key=body_key)
+
         with st.form(f"case_initial_{case.id}"):
-            channel = st.selectbox(
-                "連絡チャネル", cases.CHANNEL_OPTIONS,
-                index=(cases.CHANNEL_OPTIONS.index(case.primary_channel)
-                      if case.primary_channel in cases.CHANNEL_OPTIONS else 0),
-                format_func=lambda c: _CHANNEL_LABELS_JA.get(c, c))
             recipient = st.text_input("送信先", value=_recipient_default(case))
-            message_text = st.text_area("メッセージ内容（任意のメモ）", value="")
+            st.caption(
+                "⚠️ このボタンは、上の文面を外部（メールソフト・SNS等）で"
+                "実際に送信した**あとに**押してください。送信した事実を記録するだけで、"
+                "ここから送信は行われません。"
+            )
             submitted = st.form_submit_button("✉️ 初回メッセージを送信した", type="primary")
         if submitted:
             cases.update_case(client, user_id, case.id, primary_channel=channel)
+            body_text = st.session_state.get(body_key, draft.body)
+            if draft.uses_subject:
+                subject_text = st.session_state.get(subject_key, draft.subject)
+                message_text = f"件名: {subject_text}\n\n{body_text}" if subject_text else body_text
+            else:
+                message_text = body_text
             _log_and_flash(client, case.id, cases.EVENT_INITIAL,
                           channel=channel, recipient=recipient, message_text=message_text)
             st.rerun()

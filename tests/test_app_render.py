@@ -2258,6 +2258,77 @@ def test_case_detail_initial_message_logs_event():
     assert "user_id" not in params and "p_user_id" not in params
 
 
+def test_case_detail_not_contacted_shows_editable_approach_message_draft():
+    """案件詳細（未送信）に、チャネル別の文面案が表示され、件名・本文を編集できる"""
+    row = _app_case_row(status=cases.STATUS_NOT_CONTACTED, primary_channel="email")
+    fake = _FakeCasesClient(cases=[row])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=candidates_ui.VIEW_CASES).run()
+        at.session_state[candidates_ui.SELECTED_CASE_ID] = "case-1"
+        at = at.run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    assert "この画面から送信は行われません" in _text(at), "外部送信ではなく記録用ボタンだという注記が無い"
+    subject_box = [ti for ti in at.text_input if ti.label == "件名"][0]
+    body_box = [ta for ta in at.text_area if ta.label == "本文"][0]
+    assert "ダッシュボード確認商品" in subject_box.value
+    assert "ダッシュボード確認商品" in body_box.value
+
+
+def test_case_detail_initial_message_uses_edited_draft_body_as_message_text():
+    """文面案の本文を編集して送信記録すると、編集後の文章がイベントのメモとして記録される"""
+    row = _app_case_row(status=cases.STATUS_NOT_CONTACTED, primary_channel="email")
+    fake = _FakeCasesClient(cases=[row])
+
+    def _handle_log_event(params):
+        return _FakeCasesResponse({"event_id": "ev-1", "status": "awaiting_first_reply",
+                                   "next_action_at": "2026-11-04", "next_action_label": "1回目フォロー"})
+    fake._store["rpc_handlers"]["log_case_event"] = _handle_log_event
+
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=candidates_ui.VIEW_CASES).run()
+        at.session_state[candidates_ui.SELECTED_CASE_ID] = "case-1"
+        at = at.run()
+        body_box = [ta for ta in at.text_area if ta.label == "本文"][0]
+        at = body_box.set_value("編集済みの本文テスト").run()
+        submit = [b for b in at.button if "初回メッセージを送信した" in b.label][0]
+        at = submit.click().run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    rpc_calls = [c for c in fake._store["calls"] if c[0] == "log_case_event"]
+    assert len(rpc_calls) == 1
+    params = rpc_calls[0][1]
+    assert "編集済みの本文テスト" in params["p_message_text"]
+
+
+def test_case_detail_approach_message_draft_changes_with_channel():
+    """連絡チャネルを切り替えると、文面案もそのチャネル向けの書式に変わる"""
+    row = _app_case_row(status=cases.STATUS_NOT_CONTACTED, primary_channel="email")
+    fake = _FakeCasesClient(cases=[row])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=candidates_ui.VIEW_CASES).run()
+        at.session_state[candidates_ui.SELECTED_CASE_ID] = "case-1"
+        at = at.run()
+        assert [ti for ti in at.text_input if ti.label == "件名"], "メールは件名欄が出るはず"
+        channel_box = [sb for sb in at.selectbox if sb.label == "連絡チャネル"][0]
+        at = channel_box.set_value("instagram").run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    assert [ti for ti in at.text_input if ti.label == "件名"] == [], "Instagramは件名欄が出ないはず"
+    body_box = [ta for ta in at.text_area if ta.label == "本文"][0]
+    assert "Dear" not in body_box.value
+
+
 def test_case_detail_awaiting_first_reply_shows_followup_and_reply_actions():
     row = _app_case_row(status=cases.STATUS_AWAITING_FIRST_REPLY, next_action_label="1回目フォロー")
     fake = _FakeCasesClient(cases=[row])
