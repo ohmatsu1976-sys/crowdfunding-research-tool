@@ -978,7 +978,7 @@ def test_non_admin_does_not_see_admin_view_option():
 
     assert not at.exception, str(at.exception)
     assert list(at.radio[0].options) == [
-        "🏠 ダッシュボード", "🔍 商品をリサーチ", "🔎 商品を探す", "⭐ マイ候補リスト", "📋 案件一覧"]
+        "🏠 ダッシュボード", "🔎 商品を探す", "🔍 商品の診断とアプローチ", "⭐ マイ候補リスト", "📋 案件一覧"]
     assert "管理者ビュー" not in _text(at)
 
 
@@ -995,7 +995,7 @@ def test_admin_sees_three_view_options():
 
     assert not at.exception, str(at.exception)
     assert list(at.radio[0].options) == [
-        "🏠 ダッシュボード", "🔍 商品をリサーチ", "🔎 商品を探す", "⭐ マイ候補リスト",
+        "🏠 ダッシュボード", "🔎 商品を探す", "🔍 商品の診断とアプローチ", "⭐ マイ候補リスト",
         "📋 案件一覧", "🛡️ 管理者ビュー"]
 
 
@@ -1265,7 +1265,7 @@ def test_summit_hides_screen_switch_and_research_steps():
     at = _summit_app().run()
     assert not at.exception, str(at.exception)
     body = _text(at)
-    assert list(at.radio) == [], "画面切替（商品をリサーチ/マイ候補リスト等）が出ている"
+    assert list(at.radio) == [], "画面切替（商品の診断とアプローチ/マイ候補リスト等）が出ている"
     assert "Step 1" not in body and "Step 2" not in body and "Step 3" not in body
     assert "URL一覧" not in body
 
@@ -1464,7 +1464,7 @@ def test_student_research_flow_unaffected_by_summit_feature():
     at = at.run()
     assert not at.exception, str(at.exception)
     assert "Step 1" in _text(at)
-    assert list(at.radio), "画面切替（商品をリサーチ/マイ候補リスト）が出ていない"
+    assert list(at.radio), "画面切替（商品の診断とアプローチ/マイ候補リスト）が出ていない"
     assert not any(t.value == summit_ui.TITLE for t in at.title)
 
 
@@ -1481,7 +1481,7 @@ def test_admin_role_unaffected_by_summit_feature():
     assert not at.exception, str(at.exception)
     assert "Step 1" in _text(at)
     assert list(at.radio[0].options) == [
-        "🏠 ダッシュボード", "🔍 商品をリサーチ", "🔎 商品を探す", "⭐ マイ候補リスト", "📋 案件一覧"], (
+        "🏠 ダッシュボード", "🔎 商品を探す", "🔍 商品の診断とアプローチ", "⭐ マイ候補リスト", "📋 案件一覧"], (
         "role='admin'というuser_metadataの値だけで管理者ビューが増えてはいけない"
     )
 

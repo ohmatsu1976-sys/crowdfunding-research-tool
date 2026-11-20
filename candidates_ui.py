@@ -30,7 +30,7 @@ from ui_state_keys import (
 # clear_state() はこの接頭辞のキーをまとめて消す）
 SAVED_URLS = "cand_saved_urls"        # 今回のセッションで保存に成功したURL
 LAST_MESSAGE = "cand_last_message"    # 直近の操作結果メッセージ（表示後に消す）
-VIEW = "cand_view"                    # 画面切替（商品をリサーチ／マイ候補リスト／管理者ビュー）
+VIEW = "cand_view"                    # 画面切替（商品の診断とアプローチ／マイ候補リスト／管理者ビュー）
 SHOW_ARCHIVED = "cand_show_archived"  # 一覧でアーカイブ済みも表示するか
 
 # 管理者ビュー（フェーズ3D）の絞り込み・ページ状態
@@ -42,7 +42,7 @@ ADMIN_PAGE = "cand_admin_page"
 
 _VIEW_LABELS = {
     VIEW_DASHBOARD: "🏠 ダッシュボード",
-    VIEW_SEARCH: "🔍 商品をリサーチ",
+    VIEW_SEARCH: "🔍 商品の診断とアプローチ",
     VIEW_DISCOVER: "🔎 商品を探す",
     VIEW_LIST: "⭐ マイ候補リスト",
     VIEW_CASES: "📋 案件一覧",
@@ -179,9 +179,9 @@ def render_view_switch(client) -> None:
     if _set_session_for_admin_check(client):
         is_admin_now = candidates.is_admin(client)
 
-    options = ((VIEW_DASHBOARD, VIEW_SEARCH, VIEW_DISCOVER, VIEW_LIST, VIEW_CASES, VIEW_ADMIN)
+    options = ((VIEW_DASHBOARD, VIEW_DISCOVER, VIEW_SEARCH, VIEW_LIST, VIEW_CASES, VIEW_ADMIN)
               if is_admin_now
-              else (VIEW_DASHBOARD, VIEW_SEARCH, VIEW_DISCOVER, VIEW_LIST, VIEW_CASES))
+              else (VIEW_DASHBOARD, VIEW_DISCOVER, VIEW_SEARCH, VIEW_LIST, VIEW_CASES))
     if st.session_state.get(VIEW, VIEW_DASHBOARD) not in options:
         st.session_state[VIEW] = VIEW_DASHBOARD
 
@@ -236,7 +236,7 @@ def render_list_screen(client) -> None:
         if show_archived:
             st.info("アーカイブ済みの候補もありません。")
         else:
-            st.info("まだ候補がありません。「商品をリサーチ」から検索して保存してください。")
+            st.info("まだ候補がありません。「商品の診断とアプローチ」から検索して保存してください。")
         return
 
     for item in items:
