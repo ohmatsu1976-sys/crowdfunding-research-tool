@@ -39,10 +39,29 @@ st.rerunして別の画面へ遷移すると、ブラウザがまだ書き込み
 ことを確認し、(2) まだなら書き込みを（再）要求する。試行回数の上限に
 達しても確認できない場合は、永続保存だけを諦めて通常ログインへ進む
 （保存の失敗で画面を無限に止めない）。
+
+【起動時の復元中にログイン画面が一瞬出る問題への対応】
+起動直後（F5直後）も同じ非同期の事情があり、CookieManagerの値がまだ
+届いていない1回目の実行では「Cookieが無い」のか「まだ届いていないだけ」
+なのかを区別できない。これを「無い」と即断してログインフォームを出すと、
+実際には有効なCookieがある場合でも一瞬ログイン画面が表示されてしまう
+（復元自体は直後の自動再実行で成功するため実害は無いが、見た目が悪い）。
+
+このため restore_login_from_cookie() は、Cookieがまだ届いていない間は
+RESTORE_DONEを立てずに「確認中」の状態を保つが、無期限には待たない。
+実時間での期限（RESTORE_CHECK_MAX_WAIT_SECONDS）と、rerunが極端に速く
+繰り返されるような異常系に備えた試行回数の安全弁（
+RESTORE_CHECK_HARD_MAX_ATTEMPTS）の両方で区切り、どちらかに達したら
+「Cookie無しと確定」してRESTORE_DONEを立てる。st.rerunの間隔は実ブラウザ
+との往復にかかる実時間に依存し一定ではないため、試行回数だけで区切ると
+遅い応答を早期に諦めてしまう恐れがある（＝時間を主たる基準にし、回数は
+あくまで保険）。呼び出し側（auth_ui.py）は is_restore_checking() が真の
+間、ログインフォームの代わりに「確認しています」画面を表示してrerunする。
 """
 
 from __future__ import annotations
 
+import time
 from typing import Any, Callable, MutableMapping, Optional
 
 import auth
@@ -56,6 +75,12 @@ MAX_AGE_SECONDS = 30 * 24 * 60 * 60  # 30日
 # session_stateキー。空のCookie（まだコンポーネントの返信が届いていないだけの
 # 可能性がある）では立てず、実際に値を処理した（復元成功／失敗）時だけ立てる。
 RESTORE_DONE = "auth_cookie_restore_done"
+
+# 起動時の復元確認（二段階処理）で使うsession_stateキー・上限
+RESTORE_DEADLINE = "auth_cookie_restore_deadline"        # 確認を諦める実時刻（time.time()）
+RESTORE_CHECK_ATTEMPTS = "auth_cookie_restore_check_attempts"
+RESTORE_CHECK_MAX_WAIT_SECONDS = 5.0  # 実時間でこれだけ待っても届かなければ「無し」と確定
+RESTORE_CHECK_HARD_MAX_ATTEMPTS = 20  # rerunが異常に速く続く場合の安全弁（時間切れより先には効かない想定）
 
 # ログイン成功直後のCookie保存（二段階処理）で使うsession_stateキー
 SAVE_PENDING = "auth_cookie_save_pending"    # 保存を確認し終えるまでTrue
@@ -250,9 +275,35 @@ def forget_login(*, manager_factory: Optional[Callable] = None) -> None:
     _safe_delete(manager)
 
 
+def is_restore_checking(state: MutableMapping[str, Any]) -> bool:
+    """起動時のCookie復元が、まだ「確認中」（結果未確定）かどうか
+
+    呼び出し側（auth_ui.py）はこれが真の間、ログインフォームの代わりに
+    「ログイン状態を確認しています…」を表示してrerunする。認証済み、
+    または復元結果が確定済み（成功／Cookie無し／無効）になった時点で偽になる。
+    """
+    if auth.is_authenticated(state):
+        return False
+    return not state.get(RESTORE_DONE)
+
+
+def _give_up_restore_check(state: MutableMapping[str, Any], manager) -> None:
+    """実時間・試行回数の上限に達した。「Cookie無し」と確定して待つのをやめる
+
+    実際にはCookieが存在するのに応答が遅いだけ、という可能性も残るため
+    （＝誤って「無し」と確定しても）、delete自体は失敗しても問題ない安全側の
+    操作に留める。
+    """
+    _safe_delete(manager)
+    state[RESTORE_DONE] = True
+    state.pop(RESTORE_DEADLINE, None)
+    state[RESTORE_CHECK_ATTEMPTS] = 0
+
+
 def restore_login_from_cookie(
     client, state: MutableMapping[str, Any], *,
     secrets: Any = None, manager_factory: Optional[Callable] = None,
+    now: Optional[float] = None,
 ) -> None:
     """起動時（ルーティングより前）に一度だけ呼ぶ。Cookieからログインを復元する
 
@@ -265,16 +316,34 @@ def restore_login_from_cookie(
     （空）を返し、実際の値は直後の自動再実行で届く。ここで確定扱いにしてしまうと、
     本当はCookieがあるのに1回目の空値だけを見て復元を諦めてしまう
     （無限ループは起きないが、復元に失敗するバグになる）。
+
+    ただし無期限に待つわけではない。実時間での期限
+    （RESTORE_CHECK_MAX_WAIT_SECONDS）、または試行回数の安全弁
+    （RESTORE_CHECK_HARD_MAX_ATTEMPTS）のいずれかに達した時点で
+    「Cookie無し」と確定する（is_restore_checking()参照）。
     """
     if auth.is_authenticated(state):
         return
     if state.get(RESTORE_DONE):
         return
 
+    now = time.time() if now is None else now
     manager = (manager_factory or _default_manager_factory)()
     raw = manager.get(COOKIE_NAME)
     if not raw:
-        return  # 届いていないだけ、またはそもそもCookieが無い
+        deadline = state.get(RESTORE_DEADLINE)
+        if deadline is None:
+            deadline = now + RESTORE_CHECK_MAX_WAIT_SECONDS
+            state[RESTORE_DEADLINE] = deadline
+        attempts = int(state.get(RESTORE_CHECK_ATTEMPTS, 0)) + 1
+        state[RESTORE_CHECK_ATTEMPTS] = attempts
+        if now >= deadline or attempts >= RESTORE_CHECK_HARD_MAX_ATTEMPTS:
+            _give_up_restore_check(state, manager)
+        return  # 届いていないだけ、またはそもそもCookieが無い（確定前）
+
+    # Cookieが届いた。確認中のための状態は不要になったため消す
+    state.pop(RESTORE_DEADLINE, None)
+    state[RESTORE_CHECK_ATTEMPTS] = 0
 
     secrets = _default_secrets() if secrets is None else secrets
     fernet = make_fernet(secrets)

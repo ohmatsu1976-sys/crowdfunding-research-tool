@@ -48,6 +48,19 @@ def _new_client():
         st.stop()
 
 
+def _checking_login_screen() -> None:
+    """起動直後、Cookieからの復元結果がまだ確定していない間に表示する画面
+
+    auth_cookies.is_restore_checking() が真の間だけ呼ばれる。ここで
+    ログインフォームを出さずに済ませることで、実際には有効なCookieが
+    あるのに一瞬ログイン画面が表示されてしまう問題を防ぐ。結果が確定
+    （復元成功／Cookie無し・無効の確定）すれば、次のrerunでは呼ばれない。
+    """
+    st.title(_TITLE)
+    st.info("ログイン状態を確認しています…", icon="🔐")
+    st.rerun()
+
+
 def _login_screen(client) -> None:
     st.title(_TITLE)
     st.caption("受講生専用ツールです。管理者から配布されたアカウントでログインしてください。")
@@ -171,6 +184,12 @@ def require_login():
     # 永続Cookie（暗号化済み）があればログイン状態を復元する。
     # ルーティング（画面切替・検索フォーム等）より前に、ここで一度だけ行う。
     auth_cookies.restore_login_from_cookie(client, st.session_state)
+
+    # 復元結果がまだ確定していない間は、ログインフォームではなく
+    # 「確認しています」を見せる（結果が確定するまで一瞬ログイン画面が
+    # 出てしまう問題への対応）。
+    if auth_cookies.is_restore_checking(st.session_state):
+        _checking_login_screen()
 
     if not auth.is_authenticated(st.session_state):
         _login_screen(client)

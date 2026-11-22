@@ -244,6 +244,12 @@ def test_auth_ui_wires_persistent_cookie_at_all_required_points():
     idx_gate = code.index("is_authenticated ( st . session_state )")
     assert idx_client < idx_restore < idx_gate
 
+    # 復元結果が確定していない間は、ログインフォームの前に「確認しています」
+    # 画面を挟む（復元中に一瞬ログイン画面が出てしまう問題への対応）
+    assert code.count("auth_cookies . is_restore_checking ( st . session_state )") == 1
+    idx_checking = code.index("auth_cookies . is_restore_checking ( st . session_state )")
+    assert idx_restore < idx_checking < idx_gate
+
     # ログイン成功直後は「保存を要求した」ことを示すだけ（実際の書き込み・
     # 確認はensure_login_saved側）。直後にはst.rerunするだけで、別の画面の
     # 描画を挟まない（実ブラウザでCookieManagerの書き込みが中断されるバグの
