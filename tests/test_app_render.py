@@ -2126,6 +2126,19 @@ def _app_case_row(**overrides):
     return row
 
 
+def _app_event_row(**overrides):
+    row = {
+        "id": "ev-1", "case_id": "case-1", "user_id": "test-user", "kind": "initial",
+        "channel": "email", "recipient": "maker@example.com",
+        "occurred_at": "2026-11-01T00:00:00+00:00", "message_text": "Hello",
+        "translated_text": "", "ai_assist": None, "target_status": None,
+        "voided_at": None, "voided_reason": "", "superseded_by": None,
+        "redacted_at": None, "created_at": "2026-11-01T00:00:00+00:00",
+    }
+    row.update(overrides)
+    return row
+
+
 # ── ダッシュボード（通常版の既定画面）────────────────────────────────────────────
 
 def test_dashboard_shows_empty_state_when_no_cases():
@@ -2427,7 +2440,226 @@ def test_case_detail_shows_timeline_from_valid_events_only():
     assert not at.exception, str(at.exception)
     body = _text(at)
     assert "初回送信" in body, "有効なイベントが履歴に出ていない"
-    assert "1回目フォロー" not in body, "取消し済み(voided_at有り)のイベントが履歴に出ている"
+
+    history_expanders = [e for e in at.expander if "訂正・取消し履歴" in e.label]
+    assert len(history_expanders) == 1, "取消し済みイベント用の折りたたみ欄が出ていない"
+    all_followup_lines = [m for m in at.markdown if "1回目フォロー" in m.value]
+    assert all_followup_lines, "取消し済みイベントが「訂正・取消し履歴」欄にも出ていない"
+    in_history = [m for m in history_expanders[0].markdown if "1回目フォロー" in m.value]
+    assert len(all_followup_lines) == len(in_history), (
+        "取消し済み(voided_at有り)のイベントが通常の履歴（折りたたみ欄の外）に出ている"
+    )
+
+
+def test_case_detail_timeline_shows_correct_redact_void_actions_for_active_event():
+    """有効なイベントには、訂正・伏せ字化・取消しの3操作がすべて開ける"""
+    row = _app_case_row(status=cases.STATUS_ADVANCED)
+    events = [_app_event_row()]
+    fake = _FakeCasesClient(cases=[row], case_events=events)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=candidates_ui.VIEW_CASES).run()
+        at.session_state[candidates_ui.SELECTED_CASE_ID] = "case-1"
+        at = at.run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    action_expanders = [e for e in at.expander if "訂正・伏せ字化・取消し" in e.label]
+    assert len(action_expanders) == 1
+    panel = action_expanders[0]
+    assert any("本文" == ta.label for ta in panel.text_area)
+    assert any("翻訳文" == ta.label for ta in panel.text_area)
+    assert any("取消し理由" in ti.label for ti in panel.text_input)
+    assert any("伏せ字化する" in b.label for b in panel.button)
+    assert any("取消す" in b.label for b in panel.button)
+
+
+def test_case_detail_correct_event_calls_correct_case_event_rpc():
+    """訂正フォームを送ると、correct_case_event RPCが本文・翻訳文だけを渡して呼ばれる"""
+    row = _app_case_row(status=cases.STATUS_ADVANCED)
+    events = [_app_event_row()]
+    fake = _FakeCasesClient(cases=[row], case_events=events)
+
+    def _handle_correct(params):
+        return _FakeCasesResponse({"old_event_id": "ev-1", "new_event_id": "ev-2",
+                                   "case_id": "case-1"})
+    fake._store["rpc_handlers"]["correct_case_event"] = _handle_correct
+
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=candidates_ui.VIEW_CASES).run()
+        at.session_state[candidates_ui.SELECTED_CASE_ID] = "case-1"
+        at = at.run()
+        msg_box = [ta for ta in at.text_area if ta.label == "本文"][0]
+        at = msg_box.set_value("訂正後の本文").run()
+        submit = [b for b in at.button if b.label == "訂正を保存する"][0]
+        at = submit.click().run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    assert "訂正しました" in _text(at)
+    rpc_calls = [c for c in fake._store["calls"] if c[0] == "correct_case_event"]
+    assert len(rpc_calls) == 1
+    params = rpc_calls[0][1]
+    assert params["p_event_id"] == "ev-1"
+    assert params["p_message_text"] == "訂正後の本文"
+    assert "user_id" not in params and "p_user_id" not in params
+
+
+def test_case_detail_redact_button_disabled_until_confirmed():
+    """伏せ字化ボタンは、確認チェックを入れるまで押せない"""
+    row = _app_case_row(status=cases.STATUS_ADVANCED)
+    events = [_app_event_row()]
+    fake = _FakeCasesClient(cases=[row], case_events=events)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=candidates_ui.VIEW_CASES).run()
+        at.session_state[candidates_ui.SELECTED_CASE_ID] = "case-1"
+        at = at.run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    assert "元に戻せない" in _text(at)
+    redact_btn = [b for b in at.button if b.label == "🔒 伏せ字化する"][0]
+    assert redact_btn.disabled is True
+
+
+def test_case_detail_redact_confirmed_calls_redact_case_event_rpc():
+    """確認チェックを入れてから押すと、redact_case_event RPCが呼ばれる"""
+    row = _app_case_row(status=cases.STATUS_ADVANCED)
+    events = [_app_event_row()]
+    fake = _FakeCasesClient(cases=[row], case_events=events)
+    fake._store["rpc_handlers"]["redact_case_event"] = (
+        lambda params: _FakeCasesResponse({"event_id": "ev-1", "redacted": True}))
+
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=candidates_ui.VIEW_CASES).run()
+        at.session_state[candidates_ui.SELECTED_CASE_ID] = "case-1"
+        at = at.run()
+        confirm_box = [cb for cb in at.checkbox
+                      if "元に戻せないことを理解した上で" in cb.label][0]
+        at = confirm_box.set_value(True).run()
+        redact_btn = [b for b in at.button if b.label == "🔒 伏せ字化する"][0]
+        assert redact_btn.disabled is False
+        at = redact_btn.click().run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    assert "伏せ字化しました" in _text(at)
+    rpc_calls = [c for c in fake._store["calls"] if c[0] == "redact_case_event"]
+    assert len(rpc_calls) == 1
+    assert rpc_calls[0][1]["p_event_id"] == "ev-1"
+
+
+def test_case_detail_void_button_disabled_without_reason_or_confirmation():
+    """取消しボタンは、理由入力と確認チェックの両方が揃うまで押せない"""
+    row = _app_case_row(status=cases.STATUS_ADVANCED)
+    events = [_app_event_row()]
+    fake = _FakeCasesClient(cases=[row], case_events=events)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=candidates_ui.VIEW_CASES).run()
+        at.session_state[candidates_ui.SELECTED_CASE_ID] = "case-1"
+        at = at.run()
+        void_btn = [b for b in at.button if b.label == "🗑 取消す"][0]
+        assert void_btn.disabled is True, "理由未入力・未確認で押せてしまう"
+
+        confirm_box = [cb for cb in at.checkbox if cb.label == "この記録を取消します"][0]
+        at = confirm_box.set_value(True).run()
+        void_btn = [b for b in at.button if b.label == "🗑 取消す"][0]
+        assert void_btn.disabled is True, "理由が空のまま、確認だけで押せてしまう"
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+
+
+def test_case_detail_void_with_reason_and_confirmation_calls_void_case_event_rpc():
+    """理由入力＋確認チェックの両方が揃うと、void_case_event RPCへ理由が渡る"""
+    row = _app_case_row(status=cases.STATUS_ADVANCED)
+    events = [_app_event_row()]
+    fake = _FakeCasesClient(cases=[row], case_events=events)
+    fake._store["rpc_handlers"]["void_case_event"] = (
+        lambda params: _FakeCasesResponse({"event_id": "ev-1", "case_id": "case-1", "voided": True}))
+
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=candidates_ui.VIEW_CASES).run()
+        at.session_state[candidates_ui.SELECTED_CASE_ID] = "case-1"
+        at = at.run()
+        reason_box = [ti for ti in at.text_input if "取消し理由" in ti.label][0]
+        at = reason_box.set_value("入力間違い").run()
+        confirm_box = [cb for cb in at.checkbox if cb.label == "この記録を取消します"][0]
+        at = confirm_box.set_value(True).run()
+        void_btn = [b for b in at.button if b.label == "🗑 取消す"][0]
+        assert void_btn.disabled is False
+        at = void_btn.click().run()
+    finally:
+        supabase_module.create_client = original
+
+    assert not at.exception, str(at.exception)
+    assert "取消しました" in _text(at)
+    rpc_calls = [c for c in fake._store["calls"] if c[0] == "void_case_event"]
+    assert len(rpc_calls) == 1
+    assert rpc_calls[0][1]["p_reason"] == "入力間違い"
+
+
+def test_case_detail_redacted_event_hides_correct_and_redact_actions():
+    """伏せ字化済みのイベントには、訂正・伏せ字化の操作を出さない（取消しのみ）"""
+    row = _app_case_row(status=cases.STATUS_ADVANCED)
+    events = [_app_event_row(redacted_at="2026-11-02T00:00:00+00:00",
+                             message_text="［伏せ字化済み：内容は削除されました］")]
+    fake = _FakeCasesClient(cases=[row], case_events=events)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=candidates_ui.VIEW_CASES).run()
+        at.session_state[candidates_ui.SELECTED_CASE_ID] = "case-1"
+        at = at.run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    assert "🔒伏せ字化済み" in _text(at)
+    action_expanders = [e for e in at.expander if "訂正・伏せ字化・取消し" in e.label]
+    assert len(action_expanders) == 1
+    panel = action_expanders[0]
+    assert list(panel.text_area) == [], "伏せ字化済みイベントに訂正欄が出ている"
+    assert not any("伏せ字化する" in b.label for b in panel.button), (
+        "伏せ字化済みイベントに伏せ字化ボタンが出ている"
+    )
+    assert any("取消す" in b.label for b in panel.button), "取消しボタンが出ていない"
+
+
+def test_case_detail_voided_event_has_no_action_panel():
+    """取消し済みのイベント（訂正・取消し履歴欄）には操作パネルを出さない"""
+    row = _app_case_row(status=cases.STATUS_ADVANCED)
+    events = [
+        _app_event_row(),
+        _app_event_row(id="ev-2", kind="followup1", channel="", recipient="",
+                       occurred_at="2026-11-05T00:00:00+00:00", message_text="",
+                       voided_at="2026-11-06T00:00:00+00:00", voided_reason="mistake",
+                       created_at="2026-11-05T00:00:00+00:00"),
+    ]
+    fake = _FakeCasesClient(cases=[row], case_events=events)
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=candidates_ui.VIEW_CASES).run()
+        at.session_state[candidates_ui.SELECTED_CASE_ID] = "case-1"
+        at = at.run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    action_expanders = [e for e in at.expander if "訂正・伏せ字化・取消し" in e.label]
+    assert len(action_expanders) == 1, "取消し済みイベントにまで操作パネルが出ている"
 
 
 # ── マイ候補リストからの「商品案件を作成」ボタン ─────────────────────────────────

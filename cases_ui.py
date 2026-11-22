@@ -468,17 +468,91 @@ _EVENT_KIND_LABELS_JA = {
 }
 
 
+def _event_line(ev: "cases.CaseEvent", *, voided: bool = False) -> str:
+    occurred = cases.to_jst_date(ev.occurred_at)
+    label = _EVENT_KIND_LABELS_JA.get(ev.kind, ev.kind)
+    line = f"{occurred.isoformat() if occurred else '－'}　**{label}**"
+    if ev.channel:
+        line += f"　（{_CHANNEL_LABELS_JA.get(ev.channel, ev.channel)}）"
+    if ev.redacted_at:
+        line += "　🔒伏せ字化済み"
+    if voided:
+        voided_date = cases.to_jst_date(ev.voided_at)
+        line += f"　（取消し済み: {voided_date.isoformat() if voided_date else '－'}）"
+    return line
+
+
+def _render_correct_form(client, ev: "cases.CaseEvent") -> None:
+    st.markdown("**✏️ 訂正**（本文・翻訳文だけを直せます。種類・発生日時は変わりません）")
+    with st.form(f"case_correct_{ev.id}"):
+        message_text = st.text_area("本文", value=ev.message_text, key=f"case_correct_msg_{ev.id}")
+        translated_text = st.text_area("翻訳文", value=ev.translated_text,
+                                       key=f"case_correct_tr_{ev.id}")
+        submitted = st.form_submit_button("訂正を保存する")
+    if submitted:
+        result = cases.correct_event(client, ev.id, message_text=message_text,
+                                     translated_text=translated_text)
+        _flash("訂正しました。元の内容は「訂正・取消し履歴」に残ります。"
+              if result.ok else result.message)
+        st.rerun()
+
+
+def _render_redact_action(client, ev: "cases.CaseEvent") -> None:
+    st.markdown("**🔒 伏せ字化**")
+    st.warning(
+        "⚠️ 伏せ字化すると、本文・翻訳文・AI支援結果が元に戻せない固定の文言に"
+        "置き換わります。あとから元の内容を復元することはできません。"
+    )
+    confirm_key = f"case_redact_confirm_{ev.id}"
+    confirmed = st.checkbox("元に戻せないことを理解した上で、伏せ字化します", key=confirm_key)
+    if st.button("🔒 伏せ字化する", key=f"case_redact_btn_{ev.id}", disabled=not confirmed):
+        result = cases.redact_event(client, ev.id)
+        _flash("伏せ字化しました。" if result.ok else result.message)
+        st.rerun()
+
+
+def _render_void_action(client, ev: "cases.CaseEvent") -> None:
+    st.markdown("**🗑 取消し**（記録そのものは削除されず、「訂正・取消し履歴」に残ります）")
+    reason = st.text_input("取消し理由（必須）", key=f"case_void_reason_{ev.id}")
+    confirm_key = f"case_void_confirm_{ev.id}"
+    confirmed = st.checkbox("この記録を取消します", key=confirm_key)
+    can_submit = confirmed and bool(reason.strip())
+    if st.button("🗑 取消す", key=f"case_void_btn_{ev.id}", disabled=not can_submit):
+        result = cases.void_event(client, ev.id, reason=reason)
+        _flash("取消しました。" if result.ok else result.message)
+        st.rerun()
+
+
+def _render_event_actions(client, ev: "cases.CaseEvent") -> None:
+    with st.expander("この記録を訂正・伏せ字化・取消しする", expanded=False):
+        if not ev.redacted_at:
+            _render_correct_form(client, ev)
+            st.divider()
+            _render_redact_action(client, ev)
+            st.divider()
+        _render_void_action(client, ev)
+
+
 def _render_timeline(client, user_id: str, case_id: str) -> None:
-    events = cases.list_case_events(client, user_id, case_id, include_voided=False)
-    if not events:
+    active_events = cases.list_case_events(client, user_id, case_id, include_voided=False)
+    if not active_events:
         st.caption("まだ記録がありません。")
-        return
-    for ev in events:
-        occurred = cases.to_jst_date(ev.occurred_at)
-        label = _EVENT_KIND_LABELS_JA.get(ev.kind, ev.kind)
-        line = f"{occurred.isoformat() if occurred else '－'}　**{label}**"
-        if ev.channel:
-            line += f"　（{_CHANNEL_LABELS_JA.get(ev.channel, ev.channel)}）"
-        st.markdown(line)
-        if ev.message_text:
-            st.caption(ev.message_text[:200])
+    else:
+        for ev in active_events:
+            st.markdown(_event_line(ev))
+            if ev.message_text:
+                st.caption(ev.message_text[:200])
+            _render_event_actions(client, ev)
+
+    all_events = cases.list_case_events(client, user_id, case_id, include_voided=True)
+    voided_events = [ev for ev in all_events if ev.voided_at]
+    if voided_events:
+        with st.expander(f"🗂 訂正・取消し履歴を表示（{len(voided_events)}件）"):
+            for ev in voided_events:
+                st.markdown(_event_line(ev, voided=True))
+                if ev.voided_reason == "corrected":
+                    st.caption("理由: 訂正による置き換え")
+                elif ev.voided_reason:
+                    st.caption(f"理由: {ev.voided_reason}")
+                if ev.message_text:
+                    st.caption(f"当時の内容: {ev.message_text[:200]}")
