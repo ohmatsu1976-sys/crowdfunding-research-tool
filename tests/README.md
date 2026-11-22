@@ -9,6 +9,7 @@ python tests/test_offline.py       # ネットワーク不要。まずこれを�
 python tests/test_search_state.py  # 検索結果の保持（session_state）
 python tests/test_result_schema.py # 検索結果の列構成の正規化・旧セッションの移行
 python tests/test_auth.py          # メール＋パスワード認証（偽クライアント）
+python tests/test_auth_cookies.py  # ブラウザ更新後のログイン復元（暗号化Cookie・偽クライアント）
 python tests/test_app_render.py    # アプリ画面の描画（Streamlit の AppTest）
 python tests/test_sdk_compat.py    # 実 Anthropic SDK との引数互換（通信なし）
 python tests/test_product_key.py   # URL正規化・対象ドメイン検証（候補リスト用）
@@ -34,6 +35,7 @@ python tests/test_network.py       # 外部サイトへ実アクセスする
 | `test_search_state.py` | なし（決定論的） | **コードの不具合**。必ず直す |
 | `test_result_schema.py` | なし（決定論的） | **コードの不具合**。必ず直す |
 | `test_auth.py` | なし（決定論的） | **コードの不具合**。必ず直す |
+| `test_auth_cookies.py` | なし（決定論的。実ブラウザ・Streamlitコンポーネント不使用） | **コードの不具合**。必ず直す |
 | `test_app_render.py` | なし（決定論的） | **コードの不具合**。必ず直す |
 | `test_sdk_compat.py` | インストール済みの Anthropic / Supabase SDK | **SDKの破壊的変更**。渡している引数を直す |
 | `test_product_key.py` | なし（決定論的） | **コードの不具合**。必ず直す |
@@ -59,6 +61,13 @@ python tests/test_network.py       # 外部サイトへ実アクセスする
 - APIキー・秘密情報は一切含みません
 - 本番の分析処理（1件30秒以上かかる処理）は実行しません
 - 外部サイトへの書き込みは行いません（読み取りのみ）
+- **実ブラウザでのCookie読み書きは検証しません。** `auth_cookies.py`の
+  暗号化・復号・復元ロジックは偽のCookieManager（`.get/.set/.delete`だけの
+  インメモリ辞書）で検証しています。`extra-streamlit-components`の実コンポーネント
+  （実際のJS・ブラウザCookie）はAppTestでは動作しないため、`auth_ui.py`側の
+  呼び出し箇所が正しいかは静的検査（`test_auth_ui_wires_persistent_cookie_at_all_required_points`）
+  で確認しています。本番相当の確認は、実際にログイン→ブラウザ更新→
+  ログイン維持を手動で確認してください。
 
 ## 主なカバー範囲
 
@@ -156,6 +165,29 @@ python tests/test_network.py       # 外部サイトへ実アクセスする
   を読んで文面に反映すること（登録・編集・削除はしない）、サミット特典版には
   表示されないこと（案件管理そのものが非表示のため）、既存の状態遷移・RPC・
   RLS・SQLは無変更であること。
+
+- **ブラウザ更新後のログイン復元（`auth_cookies.py`・`test_auth_cookies.py`）**：
+  refresh tokenだけをFernetで暗号化してからCookieへ保存し、起動時に復号・
+  `refresh_session()`で復元すること。暗号化→復号の往復、改ざん（1文字変更）・
+  鍵不一致・ttl（30日）超過・空文字/ゴミ文字列のいずれでも例外を出さずNoneに
+  なること、AUTH_COOKIE_KEY未設定・不正な形式でも永続ログインだけを無効化し
+  通常ログインはクラッシュしないこと、改ざん値ではSupabaseへ一切問い合わせない
+  こと、Cookieが届いていない（空）だけの場合は確定フラグを立てずに次回また
+  試せること、一度失敗が確定したセッションでは同じ(壊れた)Cookieで再試行
+  しない（無限ループ・refresh token浪費の防止）こと、既にログイン済みなら
+  Cookieを読みにも行かないこと、復元・ログイン成功後はローテーションされた
+  新しいrefresh tokenでCookieも更新すること、ログアウト・パスワード変更で
+  Cookieを確実に削除すること（元のCookieManager実装は未設定Cookie名への
+  deleteでKeyErrorになるため、それを握りつぶせていることも確認）、2利用者分の
+  Cookie・state・偽クライアントが混ざらないこと。`auth.py`側：`apply_session()`
+  が期限切れ時のトークンローテーションをsession_stateへ書き戻すこと、
+  `restore_session_from_refresh_token()`がrefresh tokenだけから本人情報を
+  復元し、失効・空トークンでは安全側にログアウト扱いにすること、`auth.py`が
+  Streamlit・auth_cookies.pyのどちらにも依存しないまま（偽クライアントだけで
+  テストできる構造を維持）であること。`auth_ui.py`側：永続Cookieの復元・保存・
+  削除が、起動時（ルーティングより前に一度だけ）・ログイン成功直後・
+  ログアウト（サイドバー・初回パスワード変更画面）・パスワード変更成功時の
+  正しい箇所でそれぞれ呼ばれていることを静的に確認する。
 
 - **画面モジュール間のimport順序**（`ui_state_keys.py`・`test_import_order.py`）：
   `candidates_ui.py`（画面切替）と`cases_ui.py`（案件管理）は、共有する

@@ -1,0 +1,375 @@
+# -*- coding: utf-8 -*-
+"""ブラウザ更新後もログイン状態を復元する、永続Cookie（暗号化）のテスト
+
+実行: python tests/test_auth_cookies.py
+実際のブラウザ・Streamlitコンポーネント・Supabaseへの通信は一切行わない。
+Cookieの読み書きは偽のCookieManager（.get/.set/.delete を持つだけの
+インメモリ辞書）に差し替えてテストする（auth.make_client の factory引数と
+同じ、依存を外から渡すパターン）。
+"""
+
+import sys
+import time
+
+from _harness import run  # noqa: E402
+import auth  # noqa: E402
+import auth_cookies  # noqa: E402
+import search_state as sstate  # noqa: E402
+
+from cryptography.fernet import Fernet  # noqa: E402
+
+_KEY = Fernet.generate_key().decode("utf-8")
+_OTHER_KEY = Fernet.generate_key().decode("utf-8")
+SECRETS = {auth_cookies.SECRET_NAME: _KEY}
+
+_R = "fake-refresh-token"
+_A2 = "fake-access-2"
+_R2 = "fake-refresh-2"
+
+
+class _Obj:
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+def _user(uid="user-1", email="a@example.com"):
+    return _Obj(id=uid, email=email, user_metadata={"password_changed": True},
+               app_metadata={})
+
+
+class _FakeAuth:
+    """restore_session_from_refresh_token() が呼ぶ範囲だけを模す偽auth"""
+
+    def __init__(self, user=None, fail=False):
+        self._user = user
+        self._fail = fail
+        self.calls = []
+
+    def sign_in_with_password(self, credentials):
+        self.calls.append(("sign_in_with_password", credentials))
+        if self._fail or self._user is None:
+            raise RuntimeError("invalid login")
+        return _Obj(session=_Obj(access_token="fake-access", refresh_token=_R),
+                    user=self._user)
+
+    def refresh_session(self, refresh_token):
+        self.calls.append(("refresh_session", refresh_token))
+        if self._fail or self._user is None:
+            raise RuntimeError("invalid or expired refresh token")
+        return _Obj(session=_Obj(access_token=_A2, refresh_token=_R2), user=self._user)
+
+
+class _FakeClient:
+    def __init__(self, user=None, fail=False):
+        self.auth = _FakeAuth(user, fail)
+
+
+class _FakeCookieManager:
+    """extra_streamlit_components.CookieManager を模す（実ブラウザ・JS不使用）
+
+    実物のdelete()は、存在しないCookie名を渡すとKeyErrorになる実装のため、
+    ここでも同じ挙動にする（auth_cookies._safe_delete がそれを握りつぶす
+    ことを実際に確認するため）。
+    """
+
+    def __init__(self, cookies=None):
+        self.cookies = dict(cookies or {})
+        self.set_calls = []
+        self.delete_calls = []
+
+    def get(self, name):
+        return self.cookies.get(name)
+
+    def set(self, name, value, **kwargs):
+        self.set_calls.append((name, value, kwargs))
+        self.cookies[name] = value
+
+    def delete(self, name, key="delete"):
+        self.delete_calls.append(name)
+        del self.cookies[name]  # 実物と同じ：無ければKeyError
+
+
+def _new_state() -> dict:
+    state: dict = {}
+    sstate.init_state(state)
+    return state
+
+
+# ── 暗号化・復号（純粋関数） ─────────────────────────────────────────────────────
+
+def test_encrypt_then_decrypt_round_trip():
+    """暗号化したrefresh tokenは、同じ鍵で正しく復号できる"""
+    fernet = auth_cookies.make_fernet(SECRETS)
+    token = auth_cookies.encrypt_refresh_token(fernet, _R)
+    assert auth_cookies.decrypt_refresh_token(fernet, token) == _R
+
+
+def test_tampered_cookie_value_fails_to_decrypt():
+    """改ざんされた（1文字変えた）Cookie値は復号に失敗しNoneを返す"""
+    fernet = auth_cookies.make_fernet(SECRETS)
+    token = auth_cookies.encrypt_refresh_token(fernet, _R)
+    tampered = token[:-1] + ("A" if token[-1] != "A" else "B")
+    assert auth_cookies.decrypt_refresh_token(fernet, tampered) is None
+
+
+def test_decrypt_with_wrong_key_fails():
+    """暗号化した鍵と異なる鍵では復号できない（Noneを返し例外は出さない）"""
+    fernet_a = auth_cookies.make_fernet(SECRETS)
+    fernet_b = auth_cookies.make_fernet({auth_cookies.SECRET_NAME: _OTHER_KEY})
+    token = auth_cookies.encrypt_refresh_token(fernet_a, _R)
+    assert auth_cookies.decrypt_refresh_token(fernet_b, token) is None
+
+
+def test_decrypt_rejects_token_older_than_max_age():
+    """MAX_AGE_SECONDSより古い（ttl超過の）値は、改ざんされていなくても拒否する"""
+    fernet = auth_cookies.make_fernet(SECRETS)
+    long_ago = int(time.time()) - auth_cookies.MAX_AGE_SECONDS - 10
+    old_token = fernet.encrypt_at_time(_R.encode("utf-8"), current_time=long_ago).decode("utf-8")
+    assert auth_cookies.decrypt_refresh_token(fernet, old_token) is None
+
+
+def test_decrypt_empty_or_garbage_value_returns_none_without_raising():
+    """空文字・意味のない文字列でも例外を出さずNoneを返す"""
+    fernet = auth_cookies.make_fernet(SECRETS)
+    assert auth_cookies.decrypt_refresh_token(fernet, "") is None
+    assert auth_cookies.decrypt_refresh_token(fernet, "not-a-valid-fernet-token") is None
+
+
+def test_missing_secret_gives_no_fernet():
+    """AUTH_COOKIE_KEYが未設定なら、例外を出さずNoneを返す"""
+    assert auth_cookies.load_key({}) is None
+    assert auth_cookies.make_fernet({}) is None
+
+
+def test_empty_secret_gives_no_fernet():
+    """AUTH_COOKIE_KEYが空文字でも、例外を出さずNoneを返す"""
+    assert auth_cookies.make_fernet({auth_cookies.SECRET_NAME: ""}) is None
+
+
+def test_invalid_secret_value_gives_no_fernet():
+    """AUTH_COOKIE_KEYが不正な形式（Fernetキーとして無効）でも、例外を出さずNoneを返す"""
+    assert auth_cookies.make_fernet({auth_cookies.SECRET_NAME: "not-a-real-fernet-key"}) is None
+
+
+# ── remember_login（ログイン成功直後にCookieへ保存） ──────────────────────────────
+
+def test_remember_login_writes_encrypted_cookie():
+    """ログイン成功直後、refresh tokenが暗号化されてCookieへ保存される"""
+    state = _new_state()
+    state[auth.REFRESH_TOKEN] = _R
+    manager = _FakeCookieManager()
+    auth_cookies.remember_login(state, secrets=SECRETS, manager_factory=lambda: manager)
+
+    assert auth_cookies.COOKIE_NAME in manager.cookies
+    raw = manager.cookies[auth_cookies.COOKIE_NAME]
+    assert raw != _R, "平文のまま保存している（暗号化されていない）"
+    fernet = auth_cookies.make_fernet(SECRETS)
+    assert auth_cookies.decrypt_refresh_token(fernet, raw) == _R
+
+
+def test_remember_login_sets_secure_cookie_attributes():
+    """Secure・SameSite=strict・30日・path=/ が設定される（HttpOnlyはCookieManagerの制約で不可）"""
+    state = _new_state()
+    state[auth.REFRESH_TOKEN] = _R
+    manager = _FakeCookieManager()
+    auth_cookies.remember_login(state, secrets=SECRETS, manager_factory=lambda: manager)
+
+    assert len(manager.set_calls) == 1
+    _, _, options = manager.set_calls[0]
+    assert options["secure"] is True
+    assert options["same_site"] == "strict"
+    assert options["path"] == "/"
+    assert options["max_age"] == 30 * 24 * 60 * 60
+
+
+def test_remember_login_without_key_does_not_write_cookie_or_raise():
+    """AUTH_COOKIE_KEY未設定でも例外を出さず、Cookieも書かない（通常ログインは継続）"""
+    state = _new_state()
+    state[auth.REFRESH_TOKEN] = _R
+    manager = _FakeCookieManager()
+    auth_cookies.remember_login(state, secrets={}, manager_factory=lambda: manager)
+    assert manager.set_calls == []
+
+
+def test_remember_login_without_refresh_token_does_nothing():
+    """session_stateにrefresh tokenが無ければ何もしない"""
+    state = _new_state()
+    manager = _FakeCookieManager()
+    auth_cookies.remember_login(state, secrets=SECRETS, manager_factory=lambda: manager)
+    assert manager.set_calls == []
+
+
+# ── forget_login（ログアウト・パスワード変更時にCookieを消す） ───────────────────
+
+def test_forget_login_deletes_existing_cookie():
+    """既にCookieがある場合、ログアウトで確実に消える"""
+    fernet = auth_cookies.make_fernet(SECRETS)
+    token = auth_cookies.encrypt_refresh_token(fernet, _R)
+    manager = _FakeCookieManager(cookies={auth_cookies.COOKIE_NAME: token})
+    auth_cookies.forget_login(manager_factory=lambda: manager)
+    assert auth_cookies.COOKIE_NAME not in manager.cookies
+
+
+def test_forget_login_without_existing_cookie_does_not_raise():
+    """Cookieがそもそも無い状態でログアウトしても例外を出さない
+
+    （元のCookieManager.delete()は未設定の名前に対してKeyErrorになる実装の
+    ため、auth_cookies側でこれを握りつぶせていることを確認する）
+    """
+    manager = _FakeCookieManager()  # 空
+    auth_cookies.forget_login(manager_factory=lambda: manager)  # 例外が出なければ成功
+
+
+# ── restore_login_from_cookie（起動時の復元） ─────────────────────────────────────
+
+def test_restore_login_from_cookie_success_and_rotates_cookie():
+    """有効なCookieから復元でき、復元後は新しいrefresh tokenでCookieも更新される"""
+    fernet = auth_cookies.make_fernet(SECRETS)
+    token = auth_cookies.encrypt_refresh_token(fernet, _R)
+    manager = _FakeCookieManager(cookies={auth_cookies.COOKIE_NAME: token})
+    state = _new_state()
+    client = _FakeClient(_user())
+
+    auth_cookies.restore_login_from_cookie(
+        client, state, secrets=SECRETS, manager_factory=lambda: manager)
+
+    assert auth.is_authenticated(state) is True
+    assert state[auth.USER_ID] == "user-1"
+    assert state[auth.REFRESH_TOKEN] == _R2  # ローテーション後の値
+    # Cookieも新しい値へ更新されている（古いrefresh tokenはもう無効なため）
+    new_raw = manager.cookies[auth_cookies.COOKIE_NAME]
+    assert auth_cookies.decrypt_refresh_token(fernet, new_raw) == _R2
+    assert state[auth_cookies.RESTORE_DONE] is True
+
+
+def test_restore_login_from_cookie_with_expired_refresh_token_deletes_cookie():
+    """Supabase側で失効・無効と判定されたrefresh tokenは、Cookieを削除してログイン画面へ戻す"""
+    fernet = auth_cookies.make_fernet(SECRETS)
+    token = auth_cookies.encrypt_refresh_token(fernet, _R)
+    manager = _FakeCookieManager(cookies={auth_cookies.COOKIE_NAME: token})
+    state = _new_state()
+    client = _FakeClient(fail=True)  # refresh_session()が例外を投げる
+
+    auth_cookies.restore_login_from_cookie(
+        client, state, secrets=SECRETS, manager_factory=lambda: manager)
+
+    assert auth.is_authenticated(state) is False
+    assert auth_cookies.COOKIE_NAME not in manager.cookies
+    assert state[auth_cookies.RESTORE_DONE] is True
+
+
+def test_restore_login_from_cookie_tampered_value_deletes_cookie_without_calling_supabase():
+    """改ざんされたCookieは復号できず、Supabaseへは一切問い合わせずに削除する"""
+    manager = _FakeCookieManager(cookies={auth_cookies.COOKIE_NAME: "garbage-not-fernet"})
+    state = _new_state()
+    client = _FakeClient(_user())
+
+    auth_cookies.restore_login_from_cookie(
+        client, state, secrets=SECRETS, manager_factory=lambda: manager)
+
+    assert auth.is_authenticated(state) is False
+    assert auth_cookies.COOKIE_NAME not in manager.cookies
+    assert client.auth.calls == [], "復号に失敗した値でSupabaseへ問い合わせてしまっている"
+
+
+def test_restore_login_from_cookie_without_key_deletes_cookie_and_keeps_normal_login_usable():
+    """AUTH_COOKIE_KEY未設定時は、永続Cookieだけ無効化し、クラッシュしない"""
+    manager = _FakeCookieManager(cookies={auth_cookies.COOKIE_NAME: "whatever"})
+    state = _new_state()
+    client = _FakeClient(_user())
+
+    auth_cookies.restore_login_from_cookie(
+        client, state, secrets={}, manager_factory=lambda: manager)
+
+    assert auth.is_authenticated(state) is False
+    assert auth_cookies.COOKIE_NAME not in manager.cookies
+    assert client.auth.calls == []
+
+
+def test_restore_login_from_cookie_with_no_cookie_present_does_not_finalize():
+    """Cookieが無い（まだコンポーネントから届いていない可能性も含む）場合は、
+    確定フラグを立てずに通常ログイン画面へ進む（後で本当の値が届けば次回また試せる）"""
+    manager = _FakeCookieManager()  # Cookie無し
+    state = _new_state()
+    client = _FakeClient(_user())
+
+    auth_cookies.restore_login_from_cookie(
+        client, state, secrets=SECRETS, manager_factory=lambda: manager)
+
+    assert auth.is_authenticated(state) is False
+    assert auth_cookies.RESTORE_DONE not in state
+    assert client.auth.calls == []
+
+
+def test_restore_login_from_cookie_does_not_retry_once_failed_in_same_session():
+    """同じセッション内で一度失敗が確定したら、再実行（rerun）でも再試行しない
+
+    （無限ループの防止、およびrefresh tokenの無駄な消費・ローテーションの防止）
+    """
+    manager = _FakeCookieManager(cookies={auth_cookies.COOKIE_NAME: "garbage"})
+    state = _new_state()
+    client = _FakeClient(_user())
+
+    auth_cookies.restore_login_from_cookie(
+        client, state, secrets=SECRETS, manager_factory=lambda: manager)
+    assert state[auth_cookies.RESTORE_DONE] is True
+    calls_after_first = len(client.auth.calls)
+
+    # 同じ(壊れた)Cookieがまだ残っていても、2回目は何もしない
+    manager.cookies[auth_cookies.COOKIE_NAME] = "garbage-again"
+    auth_cookies.restore_login_from_cookie(
+        client, state, secrets=SECRETS, manager_factory=lambda: manager)
+    assert len(client.auth.calls) == calls_after_first
+
+
+def test_restore_login_from_cookie_skips_when_already_authenticated():
+    """既にログイン済みのセッションでは、Cookieを読みにも行かない"""
+    state = _new_state()
+    client = _FakeClient(_user())
+    ok, _ = auth.sign_in(client, "a@example.com", "temp-password", state)
+    assert ok
+    client.auth.calls.clear()
+
+    class _Tripwire(_FakeCookieManager):
+        def get(self, name):
+            raise AssertionError("ログイン済みなのにCookieを読みに行った")
+
+    auth_cookies.restore_login_from_cookie(
+        client, state, secrets=SECRETS, manager_factory=lambda: _Tripwire())
+    assert auth.is_authenticated(state) is True
+
+
+# ── 複数利用者の分離 ─────────────────────────────────────────────────────────────
+
+def test_two_users_cookies_restore_independently_without_cross_contamination():
+    """2人分の暗号化Cookie・state・偽クライアントは、互いに混ざらず独立して復元される"""
+    fernet = auth_cookies.make_fernet(SECRETS)
+
+    state_a = _new_state()
+    manager_a = _FakeCookieManager(
+        cookies={auth_cookies.COOKIE_NAME: auth_cookies.encrypt_refresh_token(fernet, "r-a")})
+    client_a = _FakeClient(_user(uid="user-a", email="a@example.com"))
+
+    state_b = _new_state()
+    manager_b = _FakeCookieManager(
+        cookies={auth_cookies.COOKIE_NAME: auth_cookies.encrypt_refresh_token(fernet, "r-b")})
+    client_b = _FakeClient(_user(uid="user-b", email="b@example.com"))
+
+    auth_cookies.restore_login_from_cookie(
+        client_a, state_a, secrets=SECRETS, manager_factory=lambda: manager_a)
+    auth_cookies.restore_login_from_cookie(
+        client_b, state_b, secrets=SECRETS, manager_factory=lambda: manager_b)
+
+    assert state_a[auth.USER_ID] == "user-a"
+    assert state_b[auth.USER_ID] == "user-b"
+    assert state_a[auth.ACCESS_TOKEN] != "" and state_b[auth.ACCESS_TOKEN] != ""
+
+    # Aをログアウトしても、Bのstate・Cookieには一切触れない
+    auth.clear_auth(state_a)
+    auth_cookies.forget_login(manager_factory=lambda: manager_a)
+    assert auth.is_authenticated(state_b) is True
+    assert auth_cookies.COOKIE_NAME in manager_b.cookies
+
+
+if __name__ == "__main__":
+    sys.exit(run(dict(globals()), "永続ログインCookie（auth_cookies.py）のテスト"))

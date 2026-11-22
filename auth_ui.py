@@ -9,6 +9,7 @@
 import streamlit as st
 
 import auth
+import auth_cookies
 import candidates_ui
 import cases_ui
 import kickstarter_discovery_ui
@@ -60,6 +61,7 @@ def _login_screen(client) -> None:
     if submitted:
         ok, message = auth.sign_in(client, email, password, st.session_state)
         if ok:
+            auth_cookies.remember_login(st.session_state)
             st.rerun()
         st.error(message)
 
@@ -91,6 +93,7 @@ def _change_password_form(client, key_prefix: str) -> None:
         summit_ui.clear_state(st.session_state)
         sender_profiles_ui.clear_state(st.session_state)
         kickstarter_discovery_ui.clear_state(st.session_state)
+        auth_cookies.forget_login()  # 古いパスワードの永続Cookieを残さない
         _flash(message)
         st.rerun()
     st.error(message)
@@ -111,6 +114,7 @@ def _first_login_screen(client) -> None:
         summit_ui.clear_state(st.session_state)
         sender_profiles_ui.clear_state(st.session_state)
         kickstarter_discovery_ui.clear_state(st.session_state)
+        auth_cookies.forget_login()
         _flash("ログアウトしました。")
         st.rerun()
     st.stop()
@@ -126,6 +130,7 @@ def _sidebar(client) -> None:
             summit_ui.clear_state(st.session_state)
             sender_profiles_ui.clear_state(st.session_state)
             kickstarter_discovery_ui.clear_state(st.session_state)
+            auth_cookies.forget_login()
             _flash("ログアウトしました。")
             st.rerun()
         with st.expander("パスワードを変更する"):
@@ -141,6 +146,11 @@ def require_login():
     戻り値は Supabase クライアント。ログイン済みのときだけ処理が先へ進む。
     """
     client = _new_client()
+
+    # ブラウザ更新（F5/Ctrl+F5）で新しいStreamlitセッションになっても、
+    # 永続Cookie（暗号化済み）があればログイン状態を復元する。
+    # ルーティング（画面切替・検索フォーム等）より前に、ここで一度だけ行う。
+    auth_cookies.restore_login_from_cookie(client, st.session_state)
 
     if not auth.is_authenticated(st.session_state):
         _login_screen(client)

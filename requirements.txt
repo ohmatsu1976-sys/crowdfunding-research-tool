@@ -11,3 +11,8 @@ beautifulsoup4==4.15.0
 pandas==3.0.5
 cloudscraper==1.2.71
 supabase==2.31.0
+# ブラウザ更新（F5/Ctrl+F5）後もログイン状態を復元するための、暗号化Cookie保存。
+# auth_cookies.py 参照。AUTH_COOKIE_KEY（Secrets）が無い/不正な場合は
+# 永続ログインだけを無効化し、通常ログインは壊さない。
+extra-streamlit-components==0.1.81
+cryptography==50.0.2

@@ -121,6 +121,11 @@ def apply_session(client, state: MutableMapping[str, Any]) -> bool:
 
     以後の DB アクセスが本人の JWT で行われ、RLS が本人の行だけに効くようにする。
     復元できなければ安全側に倒してログアウト扱いにする。
+
+    set_session() はaccess tokenが期限切れならrefresh tokenで自動更新する
+    （Supabase SDKの仕様）。更新された場合は新しいトークンをsession_stateへ
+    書き戻す（書き戻さないと、古いrefresh tokenはローテーションにより
+    無効化済みのため、次回呼び出し時に復元できずログアウトしてしまう）。
     """
     access = state.get(ACCESS_TOKEN) or ""
     refresh = state.get(REFRESH_TOKEN) or ""
@@ -128,12 +133,27 @@ def apply_session(client, state: MutableMapping[str, Any]) -> bool:
         clear_auth(state)
         return False
     try:
-        client.auth.set_session(access, refresh)
-        return True
+        response = client.auth.set_session(access, refresh)
     except Exception:
         # 例外の中身にはトークンが含まれうるため、一切外へ出さない
         clear_auth(state)
         return False
+    _update_tokens_if_present(state, response)
+    return True
+
+
+def _update_tokens_if_present(state: MutableMapping[str, Any], response: Any) -> None:
+    """set_session() / refresh_session() の戻り値に新しいトークンがあれば書き戻す
+
+    無い・形が想定外でも何もしない（元のトークンのまま使い続ける）。
+    """
+    session = getattr(response, "session", None)
+    new_access = getattr(session, "access_token", "") or ""
+    new_refresh = getattr(session, "refresh_token", "") or ""
+    if new_access:
+        state[ACCESS_TOKEN] = new_access
+    if new_refresh:
+        state[REFRESH_TOKEN] = new_refresh
 
 
 # ── 認証状態 ──────────────────────────────────────────────────────────────────
@@ -242,6 +262,32 @@ def sign_in(client, email: str, password: str,
         clear_auth(state)
         return False, LOGIN_FAILED
     return True, ""
+
+
+def restore_session_from_refresh_token(
+    client, state: MutableMapping[str, Any], refresh_token: str
+) -> bool:
+    """refresh tokenだけから、ログイン状態を復元する
+
+    ブラウザの永続Cookie（auth_cookies.py）など、access tokenを持たない
+    保存先からの復元専用。access tokenの有無・期限に関わらず常に
+    refresh_session()でトークンを取り直すため、apply_session()とは別の
+    関数にしている（apply_session()はsession_stateに両方あることが前提）。
+    """
+    if not refresh_token:
+        clear_auth(state)
+        return False
+    try:
+        response = client.auth.refresh_session(refresh_token)
+    except Exception:
+        clear_auth(state)
+        return False
+    session = getattr(response, "session", None)
+    user = getattr(response, "user", None) or getattr(session, "user", None)
+    if session is None or user is None or not _store(state, session, user):
+        clear_auth(state)
+        return False
+    return True
 
 
 def sign_out(client, state: MutableMapping[str, Any]) -> None:

@@ -19,6 +19,9 @@ SECRETS = {"SUPABASE_URL": "https://example.supabase.co",
 # テスト内でだけ使う偽のトークン（本物ではない）
 _A = "fake-access"
 _R = "fake-refresh"
+# refresh（ローテーション）後に返る想定の、別のトークン
+_A2 = "fake-access-2"
+_R2 = "fake-refresh-2"
 
 
 def _code_of(name: str) -> str:
@@ -66,9 +69,10 @@ def _user(changed=True, uid="user-1", email="a@example.com", role=None,
 class _FakeAuth:
     """Supabase の auth を模す。通信はせず、呼ばれた記録だけ残す"""
 
-    def __init__(self, user=None, fail=False):
+    def __init__(self, user=None, fail=False, rotate_on_set_session=False):
         self._user = user
         self._fail = fail
+        self.rotate_on_set_session = rotate_on_set_session
         self.calls = []
         self.updated = None
         self.session_set = None
@@ -83,6 +87,19 @@ class _FakeAuth:
     def set_session(self, access_token, refresh_token):
         self.calls.append("set_session")
         self.session_set = (access_token, refresh_token)
+        if self.rotate_on_set_session:
+            # 実SDKと同じく、期限切れaccess tokenを渡すとrefreshして
+            # 新しいトークンのセッションを返す（ローテーション）
+            return _Obj(session=_Obj(access_token=_A2, refresh_token=_R2),
+                        user=self._user)
+        return None
+
+    def refresh_session(self, refresh_token):
+        self.calls.append("refresh_session")
+        if self._fail or self._user is None:
+            raise RuntimeError(f"invalid refresh token {refresh_token}")
+        return _Obj(session=_Obj(access_token=_A2, refresh_token=_R2),
+                    user=self._user)
 
     def update_user(self, attributes):
         self.calls.append("update_user")
@@ -100,8 +117,8 @@ class _FakeAuth:
 
 
 class _FakeClient:
-    def __init__(self, user=None, fail=False):
-        self.auth = _FakeAuth(user, fail)
+    def __init__(self, user=None, fail=False, rotate_on_set_session=False):
+        self.auth = _FakeAuth(user, fail, rotate_on_set_session=rotate_on_set_session)
 
 
 def _logged_in_state(changed=True) -> dict:
@@ -148,7 +165,7 @@ def test_missing_secrets_message_has_no_values():
 
 def test_source_does_not_reference_forbidden_keys():
     """SUPABASE_ANON_KEY・service_role・secret key を参照していない"""
-    for name in ("auth.py", "auth_ui.py", "streamlit_app.py"):
+    for name in ("auth.py", "auth_ui.py", "auth_cookies.py", "streamlit_app.py"):
         upper = _code_of(name).upper()
         for word in ("SUPABASE_ANON_KEY", "SERVICE_ROLE", "SECRET_KEY", "SB_SECRET"):
             assert word not in upper, f"{name} が {word} を参照している"
@@ -189,10 +206,52 @@ def test_no_cache_resource_on_auth():
 
     キャッシュは全セッションで共有されるため、認証状態を載せてはいけない。
     """
-    for name in ("auth.py", "auth_ui.py", "streamlit_app.py"):
+    for name in ("auth.py", "auth_ui.py", "auth_cookies.py", "streamlit_app.py"):
         code = _code_of(name)
         assert "cache_resource" not in code, name
         assert "cache_data" not in code, name
+
+
+def test_auth_module_stays_framework_free():
+    """auth.pyはStreamlit・auth_cookies.pyのどちらにも依存しない
+
+    永続Cookie（ブラウザ・暗号化）はStreamlit固有の関心事のため、
+    auth_cookies.py側（UIに近い層）が auth.py を使う一方向だけにする。
+    auth.py側が逆にCookieやStreamlitの存在を知ってしまうと、偽クライアント
+    だけでの外部通信なしテストができなくなる。
+    """
+    code = _code_of("auth.py")
+    assert "import streamlit" not in code
+    assert "auth_cookies" not in code
+
+
+def test_auth_ui_wires_persistent_cookie_at_all_required_points():
+    """永続Cookie機能（auth_cookies.py）が、起動時復元・ログイン成功・
+    ログアウト（2画面）・パスワード変更のすべてで実際に呼ばれている
+
+    （auth_cookies.py自体のテストはtest_auth_cookies.pyで行う。ここでは
+    auth_ui.pyが正しい場所で正しい関数を呼んでいるかだけを、呼び出し式の
+    個数と前後関係で静的に確認する）
+    """
+    code = _code_of("auth_ui.py")
+
+    # 起動時の復元は、クライアント作成の直後・ログイン画面の分岐より前
+    # （ルーティングより前に一度だけ行う、という要件そのもの）
+    idx_client = code.index("client = _new_client ( )")
+    idx_restore = code.index(
+        "auth_cookies . restore_login_from_cookie ( client , st . session_state )")
+    idx_gate = code.index("is_authenticated ( st . session_state )")
+    assert idx_client < idx_restore < idx_gate
+
+    # ログイン成功直後に1回だけ保存する
+    assert code.count("auth_cookies . remember_login ( st . session_state )") == 1
+    idx_ok = code.index("if ok :")
+    idx_remember = code.index("auth_cookies . remember_login")
+    assert idx_ok < idx_remember, "ログイン成功判定より前にCookieを保存している"
+
+    # ログアウト（サイドバー・初回パスワード変更画面）とパスワード変更成功時、
+    # 合計3箇所で永続Cookieを消している
+    assert code.count("auth_cookies . forget_login ( )") == 3
 
 
 def test_auth_gate_runs_before_anthropic():
@@ -550,6 +609,83 @@ def test_apply_session_without_tokens_logs_out():
     state: dict = {}
     sstate.init_state(state)
     assert auth.apply_session(_FakeClient(), state) is False
+    assert auth.is_authenticated(state) is False
+
+
+def test_apply_session_writes_back_rotated_tokens():
+    """set_session()がトークンを更新（ローテーション）したら、session_stateへ書き戻す
+
+    書き戻さないと、古いrefresh tokenはローテーションにより無効化済みのため、
+    次回の呼び出し（長時間開いたタブでの再操作等）で復元に失敗してしまう。
+    """
+    state = _logged_in_state()
+    client = _FakeClient(_user(), rotate_on_set_session=True)
+    assert auth.apply_session(client, state) is True
+    assert state[auth.ACCESS_TOKEN] == _A2
+    assert state[auth.REFRESH_TOKEN] == _R2
+
+
+def test_apply_session_keeps_existing_tokens_when_no_rotation():
+    """set_session()が新しいトークンを返さない（期限切れでない）場合は、既存のまま"""
+    state = _logged_in_state()
+    client = _FakeClient(_user())  # rotate_on_set_session=False（既定）
+    assert auth.apply_session(client, state) is True
+    assert state[auth.ACCESS_TOKEN] == _A
+    assert state[auth.REFRESH_TOKEN] == _R
+
+
+# ── セッション復元（永続Cookie用：refresh tokenだけから）─────────────────────────
+
+def test_restore_session_from_refresh_token_success():
+    """refresh tokenだけから、ログイン状態（本人の情報すべて）を復元できる"""
+    state: dict = {}
+    sstate.init_state(state)
+    client = _FakeClient(_user())
+    ok = auth.restore_session_from_refresh_token(client, state, _R)
+    assert ok is True
+    assert auth.is_authenticated(state) is True
+    assert state[auth.USER_ID] == "user-1"
+    # refresh_session()が返した新しいトークンが保持される（ローテーション後の値）
+    assert state[auth.ACCESS_TOKEN] == _A2
+    assert state[auth.REFRESH_TOKEN] == _R2
+    assert "refresh_session" in client.auth.calls
+
+
+def test_restore_session_from_refresh_token_expired_or_invalid_clears_auth():
+    """失効・改ざん等でrefresh_session()が失敗したら、安全側に倒してログアウト扱いにする"""
+    state: dict = {}
+    sstate.init_state(state)
+    client = _FakeClient(fail=True)
+    ok = auth.restore_session_from_refresh_token(client, state, "some-refresh-token")
+    assert ok is False
+    assert auth.is_authenticated(state) is False
+    for key in auth.KEYS:
+        assert key not in state
+
+
+def test_restore_session_from_refresh_token_without_token_is_rejected():
+    """refresh tokenが空では復元を試みない"""
+    state: dict = {}
+    sstate.init_state(state)
+    client = _FakeClient(_user())
+    ok = auth.restore_session_from_refresh_token(client, state, "")
+    assert ok is False
+    assert auth.is_authenticated(state) is False
+    assert "refresh_session" not in client.auth.calls
+
+
+def test_restore_session_from_refresh_token_without_session_is_rejected():
+    """refresh_session()がセッションを返さなければ復元成立とみなさない"""
+    class _NoSession(_FakeAuth):
+        def refresh_session(self, refresh_token):
+            return _Obj(session=None, user=_user())
+
+    state: dict = {}
+    sstate.init_state(state)
+    client = _FakeClient()
+    client.auth = _NoSession(_user())
+    ok = auth.restore_session_from_refresh_token(client, state, "some-refresh-token")
+    assert ok is False
     assert auth.is_authenticated(state) is False
 
 
