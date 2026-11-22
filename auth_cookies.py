@@ -22,7 +22,23 @@ extra-streamlit-components の CookieManager は、ブラウザJS経由でCookie
 【鍵が無い/不正な場合】
 AUTH_COOKIE_KEY が未設定または不正なFernetキーの場合、例外を一切投げず、
 永続ログイン（Cookieでの復元・保存）だけを無効化する。通常のメール＋
-パスワードログインは影響を受けない。
+パスワードログインは影響を受けない。鍵の状態は key_status() で（値を
+出さずに）確認できる。
+
+【保存の二段階処理（実ブラウザ特有の非同期処理への対応）】
+CookieManagerはStreamlitのカスタムコンポーネントで、Cookieへの実際の
+書き込み（ブラウザJSの実行）は、サーバがその指示を送ってから少し遅れて
+非同期に行われる。ログイン成功直後にCookie保存を要求して「すぐに」
+st.rerunして別の画面へ遷移すると、ブラウザがまだ書き込みJSを実行する
+前にコンポーネントが画面から消えてしまい、保存が失われることがある
+（ヘッドレスのAppTestでは実JSを実行しないため、この競合は再現しない）。
+
+このため保存は begin_remember_login() → ensure_login_saved() の二段階で
+行う。ensure_login_saved() は「保存中です」画面から複数回のrerunに
+わたって呼ばれ、(1) 前回までの書き込みが実際にブラウザへ反映された
+ことを確認し、(2) まだなら書き込みを（再）要求する。試行回数の上限に
+達しても確認できない場合は、永続保存だけを諦めて通常ログインへ進む
+（保存の失敗で画面を無限に止めない）。
 """
 
 from __future__ import annotations
@@ -40,6 +56,22 @@ MAX_AGE_SECONDS = 30 * 24 * 60 * 60  # 30日
 # session_stateキー。空のCookie（まだコンポーネントの返信が届いていないだけの
 # 可能性がある）では立てず、実際に値を処理した（復元成功／失敗）時だけ立てる。
 RESTORE_DONE = "auth_cookie_restore_done"
+
+# ログイン成功直後のCookie保存（二段階処理）で使うsession_stateキー
+SAVE_PENDING = "auth_cookie_save_pending"    # 保存を確認し終えるまでTrue
+SAVE_ATTEMPTS = "auth_cookie_save_attempts"  # 確認できないまま重ねた試行回数
+SAVE_CONFIRM_MAX_ATTEMPTS = 5                # これを超えたら諦めて通常ログインへ進む
+
+STATUS_CONFIRMED = "confirmed"  # ブラウザへの保存を確認できた
+STATUS_NO_KEY = "no_key"        # AUTH_COOKIE_KEYが無い／不正（永続保存できない）
+STATUS_NO_TOKEN = "no_token"    # session_stateにrefresh tokenが無い（想定外）
+STATUS_TIMEOUT = "timeout"      # 試行上限に達しても確認できなかった（諦める）
+STATUS_PENDING = "pending"      # まだ確認できていない（呼び出し側はrerunして良い）
+
+# key_status() の戻り値（秘密の値そのものは一切含まない）
+KEY_STATUS_MISSING = "missing"
+KEY_STATUS_INVALID = "invalid"
+KEY_STATUS_CONFIGURED = "configured"
 
 
 # =============================================================================
@@ -90,6 +122,21 @@ def decrypt_refresh_token(fernet: Any, token: str) -> Optional[str]:
         return None
 
 
+def key_status(secrets: Any = None) -> str:
+    """AUTH_COOKIE_KEYの状態を、秘密の値を一切出さずに返す
+
+    KEY_STATUS_MISSING（未設定・空）／KEY_STATUS_INVALID（Fernetキーとして
+    不正な形式）／KEY_STATUS_CONFIGURED（認識できている）のいずれか。
+    管理者ビューの診断表示にだけ使う想定（本文・ログへは値を出さない）。
+    """
+    secrets = _default_secrets() if secrets is None else secrets
+    if load_key(secrets) is None:
+        return KEY_STATUS_MISSING
+    if make_fernet(secrets) is None:
+        return KEY_STATUS_INVALID
+    return KEY_STATUS_CONFIGURED
+
+
 # =============================================================================
 # ブラウザCookieの読み書き（Streamlitコンポーネントに依存）
 #
@@ -132,20 +179,69 @@ def _write_cookie(manager, fernet: Any, refresh_token: str) -> None:
         pass  # Cookie保存に失敗しても、ログイン自体は継続させる
 
 
-def remember_login(
+def begin_remember_login(state: MutableMapping[str, Any]) -> None:
+    """ログイン成功直後に呼ぶ。実際の書き込み・確認は ensure_login_saved() が
+    「保存中です」画面から複数回のrerunにわたって行う（モジュールdocstring
+    の「保存の二段階処理」を参照）。ここではフラグを立てるだけで、
+    Cookie・Secrets・Streamlitコンポーネントには一切触れない。
+    """
+    state[SAVE_PENDING] = True
+    state[SAVE_ATTEMPTS] = 0
+
+
+def is_save_pending(state: MutableMapping[str, Any]) -> bool:
+    """「保存中です」画面をまだ出す必要があるか"""
+    return bool(state.get(SAVE_PENDING))
+
+
+def _finish_save(state: MutableMapping[str, Any], status: str) -> str:
+    state[SAVE_PENDING] = False
+    state[SAVE_ATTEMPTS] = 0
+    return status
+
+
+def ensure_login_saved(
     state: MutableMapping[str, Any], *,
     secrets: Any = None, manager_factory: Optional[Callable] = None,
-) -> None:
-    """ログイン成功直後に呼ぶ。鍵が無ければ何もしない（通常ログインは継続する）"""
+) -> str:
+    """永続Cookieへの保存を確認し、まだなら（再）要求する
+
+    呼び出し側は、戻り値が STATUS_PENDING の間は画面を切り替えずに
+    「保存しています」と表示してから st.rerun() し、もう一度これを呼ぶ。
+    それ以外の戻り値が返った時点で保存フェーズは終わり（確認できた／
+    鍵が無い／試行上限に達した、のいずれか）、通常の画面へ進んでよい。
+
+    確認は、このmanagerの構築時点（__init__）のgetAll結果、つまり
+    「前回以前にブラウザから届いた値」だけを根拠にする。今回この関数内で
+    呼ぶset()の戻り値は、ブラウザの確認を経ていないローカルな楽観更新
+    （元のCookieManager実装がset()直後にself.cookiesへ即時反映するだけの
+    もの）にすぎず、確認の根拠にはならない。
+    """
+    if not state.get(SAVE_PENDING):
+        return STATUS_CONFIRMED
+
     secrets = _default_secrets() if secrets is None else secrets
     fernet = make_fernet(secrets)
     if fernet is None:
-        return
+        return _finish_save(state, STATUS_NO_KEY)
+
     refresh_token = state.get(auth.REFRESH_TOKEN) or ""
     if not refresh_token:
-        return
+        return _finish_save(state, STATUS_NO_TOKEN)
+
     manager = (manager_factory or _default_manager_factory)()
+
+    raw = manager.get(COOKIE_NAME)
+    if raw and decrypt_refresh_token(fernet, raw) == refresh_token:
+        return _finish_save(state, STATUS_CONFIRMED)
+
     _write_cookie(manager, fernet, refresh_token)
+
+    attempts = int(state.get(SAVE_ATTEMPTS, 0)) + 1
+    state[SAVE_ATTEMPTS] = attempts
+    if attempts >= SAVE_CONFIRM_MAX_ATTEMPTS:
+        return _finish_save(state, STATUS_TIMEOUT)
+    return STATUS_PENDING
 
 
 def forget_login(*, manager_factory: Optional[Callable] = None) -> None:

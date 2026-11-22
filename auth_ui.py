@@ -61,13 +61,33 @@ def _login_screen(client) -> None:
     if submitted:
         ok, message = auth.sign_in(client, email, password, st.session_state)
         if ok:
-            auth_cookies.remember_login(st.session_state)
+            # 実際のCookie書き込み・確認は require_login() の「保存中」
+            # 画面（_saving_login_screen）が複数回のrerunにわたって行う。
+            # ここで書き込みを要求して即rerunすると、実ブラウザでは
+            # CookieManagerがまだ書き込みを実行する前に画面が切り替わり、
+            # 保存が失われることがあるため。
+            auth_cookies.begin_remember_login(st.session_state)
             st.rerun()
         st.error(message)
 
     st.caption("パスワードを忘れた場合は、管理者に再発行を依頼してください。")
     st.caption("このツールに新規登録はありません。アカウントは管理者が作成します。")
     st.stop()
+
+
+def _saving_login_screen() -> None:
+    """ログイン直後、永続Cookieへの保存が確認できるまで表示する画面
+
+    auth_cookies.ensure_login_saved() が「保存の二段階処理」を一歩進める。
+    確認できた・鍵が無い・試行上限に達した、のいずれかで戻り値が
+    STATUS_PENDING以外になるまで、通常画面へは進ませない。
+    """
+    status = auth_cookies.ensure_login_saved(st.session_state)
+    if status != auth_cookies.STATUS_PENDING:
+        return
+    st.title(_TITLE)
+    st.info("ログイン状態を保存しています…", icon="💾")
+    st.rerun()
 
 
 def _change_password_form(client, key_prefix: str) -> None:
@@ -154,6 +174,9 @@ def require_login():
 
     if not auth.is_authenticated(st.session_state):
         _login_screen(client)
+
+    if auth_cookies.is_save_pending(st.session_state):
+        _saving_login_screen()
 
     if auth.must_change_password(st.session_state):
         _first_login_screen(client)

@@ -227,7 +227,8 @@ def test_auth_module_stays_framework_free():
 
 def test_auth_ui_wires_persistent_cookie_at_all_required_points():
     """永続Cookie機能（auth_cookies.py）が、起動時復元・ログイン成功・
-    ログアウト（2画面）・パスワード変更のすべてで実際に呼ばれている
+    保存の二段階確認・ログアウト（2画面）・パスワード変更のすべてで
+    実際に呼ばれている
 
     （auth_cookies.py自体のテストはtest_auth_cookies.pyで行う。ここでは
     auth_ui.pyが正しい場所で正しい関数を呼んでいるかだけを、呼び出し式の
@@ -243,11 +244,22 @@ def test_auth_ui_wires_persistent_cookie_at_all_required_points():
     idx_gate = code.index("is_authenticated ( st . session_state )")
     assert idx_client < idx_restore < idx_gate
 
-    # ログイン成功直後に1回だけ保存する
-    assert code.count("auth_cookies . remember_login ( st . session_state )") == 1
+    # ログイン成功直後は「保存を要求した」ことを示すだけ（実際の書き込み・
+    # 確認はensure_login_saved側）。直後にはst.rerunするだけで、別の画面の
+    # 描画を挟まない（実ブラウザでCookieManagerの書き込みが中断されるバグの
+    # 再発防止）
+    assert code.count("auth_cookies . begin_remember_login ( st . session_state )") == 1
     idx_ok = code.index("if ok :")
-    idx_remember = code.index("auth_cookies . remember_login")
-    assert idx_ok < idx_remember, "ログイン成功判定より前にCookieを保存している"
+    idx_begin = code.index("auth_cookies . begin_remember_login")
+    assert idx_ok < idx_begin, "ログイン成功判定より前にCookie保存を要求している"
+
+    # 認証ゲートの直後・初回パスワード変更の判定より前に、保存の確認待ち
+    # 画面（is_save_pending → _saving_login_screen）を1回だけ挟む
+    assert code.count("auth_cookies . is_save_pending ( st . session_state )") == 1
+    assert code.count("auth_cookies . ensure_login_saved ( st . session_state )") == 1
+    idx_save_pending = code.index("auth_cookies . is_save_pending ( st . session_state )")
+    idx_must_change = code.index("must_change_password ( st . session_state )")
+    assert idx_gate < idx_save_pending < idx_must_change
 
     # ログアウト（サイドバー・初回パスワード変更画面）とパスワード変更成功時、
     # 合計3箇所で永続Cookieを消している

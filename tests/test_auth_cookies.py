@@ -151,52 +151,222 @@ def test_invalid_secret_value_gives_no_fernet():
     assert auth_cookies.make_fernet({auth_cookies.SECRET_NAME: "not-a-real-fernet-key"}) is None
 
 
-# ── remember_login（ログイン成功直後にCookieへ保存） ──────────────────────────────
+# ── key_status（秘密の値を出さずに鍵の状態だけを確認する） ──────────────────────────
 
-def test_remember_login_writes_encrypted_cookie():
-    """ログイン成功直後、refresh tokenが暗号化されてCookieへ保存される"""
+def test_key_status_missing_when_secret_absent():
+    assert auth_cookies.key_status({}) == auth_cookies.KEY_STATUS_MISSING
+
+
+def test_key_status_invalid_when_secret_is_not_a_fernet_key():
+    assert auth_cookies.key_status(
+        {auth_cookies.SECRET_NAME: "not-a-real-fernet-key"}) == auth_cookies.KEY_STATUS_INVALID
+
+
+def test_key_status_configured_when_secret_is_valid():
+    assert auth_cookies.key_status(SECRETS) == auth_cookies.KEY_STATUS_CONFIGURED
+
+
+# ── begin_remember_login / ensure_login_saved（ログイン直後の二段階保存） ──────────
+#
+# 実ブラウザでは、Cookie書き込み要求（set()）の反映はサーバ→ブラウザの
+# 非同期往復を経るため、「書き込みを要求した直後の読み取り」では確認できない
+# ことがある。_FakeCookieManager（即時反映）だけでなく、_AsyncBrowser
+# （次回のCookieManager構築まで反映されない）でもテストする。
+
+class _AsyncBrowser:
+    """実ブラウザのCookieストアを模す共有バックエンド
+
+    set()は即座にはstoredへ反映されない。CookieManagerがready_after回
+    構築されるまで（＝実ブラウザでのJS実行・応答が複数回のStreamlit
+    rerunを経て届くまで）反映を遅らせる。
+    """
+
+    def __init__(self, cookies=None, ready_after=1):
+        self.stored = dict(cookies or {})
+        self.pending_writes = []
+        self.ready_after = ready_after
+        self.constructions = 0
+
+    def new_manager(self):
+        self.constructions += 1
+        if self.constructions > self.ready_after:
+            for name, val in self.pending_writes:
+                self.stored[name] = val
+            self.pending_writes = []
+        return _AsyncCookieManager(self)
+
+
+class _AsyncCookieManager:
+    """構築時点のstoredのスナップショットだけを読む（実CookieManagerの
+    __init__時getAllに相当）。set()はブラウザへの書き込み要求を記録する
+    だけで、このインスタンス自身の見える値はその場では変わらない。
+    """
+
+    def __init__(self, browser: _AsyncBrowser):
+        self._browser = browser
+        self._snapshot = dict(browser.stored)
+
+    def get(self, name):
+        return self._snapshot.get(name)
+
+    def set(self, name, value, **kwargs):
+        self._browser.pending_writes.append((name, value))
+
+    def delete(self, name, key="delete"):
+        if name not in self._browser.stored:
+            raise KeyError(name)
+        del self._browser.stored[name]
+
+
+def test_begin_remember_login_sets_pending_flag_and_resets_attempts():
+    """ログイン成功直後はis_save_pending()がTrueになり、試行回数は0から始まる"""
+    state = _new_state()
+    auth_cookies.begin_remember_login(state)
+    assert auth_cookies.is_save_pending(state) is True
+    assert state[auth_cookies.SAVE_ATTEMPTS] == 0
+
+
+def test_ensure_login_saved_writes_encrypted_cookie_with_secure_attributes():
+    """1回目の呼び出しで、refresh tokenが暗号化されてCookieへ書き込み要求される
+    （Secure・SameSite=strict・30日・path=/。HttpOnlyはCookieManagerの制約で不可）"""
     state = _new_state()
     state[auth.REFRESH_TOKEN] = _R
+    auth_cookies.begin_remember_login(state)
     manager = _FakeCookieManager()
-    auth_cookies.remember_login(state, secrets=SECRETS, manager_factory=lambda: manager)
 
-    assert auth_cookies.COOKIE_NAME in manager.cookies
-    raw = manager.cookies[auth_cookies.COOKIE_NAME]
+    status = auth_cookies.ensure_login_saved(
+        state, secrets=SECRETS, manager_factory=lambda: manager)
+
+    assert status == auth_cookies.STATUS_PENDING  # 確認は次回以降
+    assert len(manager.set_calls) == 1
+    _, raw, options = manager.set_calls[0]
     assert raw != _R, "平文のまま保存している（暗号化されていない）"
     fernet = auth_cookies.make_fernet(SECRETS)
     assert auth_cookies.decrypt_refresh_token(fernet, raw) == _R
-
-
-def test_remember_login_sets_secure_cookie_attributes():
-    """Secure・SameSite=strict・30日・path=/ が設定される（HttpOnlyはCookieManagerの制約で不可）"""
-    state = _new_state()
-    state[auth.REFRESH_TOKEN] = _R
-    manager = _FakeCookieManager()
-    auth_cookies.remember_login(state, secrets=SECRETS, manager_factory=lambda: manager)
-
-    assert len(manager.set_calls) == 1
-    _, _, options = manager.set_calls[0]
     assert options["secure"] is True
     assert options["same_site"] == "strict"
     assert options["path"] == "/"
     assert options["max_age"] == 30 * 24 * 60 * 60
 
 
-def test_remember_login_without_key_does_not_write_cookie_or_raise():
-    """AUTH_COOKIE_KEY未設定でも例外を出さず、Cookieも書かない（通常ログインは継続）"""
+def test_ensure_login_saved_confirms_with_simple_fake_manager_within_two_calls():
+    """即時反映の偽Cookieでも、確認は（set()自身の戻り値ではなく）次回読み取りで行う"""
     state = _new_state()
     state[auth.REFRESH_TOKEN] = _R
+    auth_cookies.begin_remember_login(state)
     manager = _FakeCookieManager()
-    auth_cookies.remember_login(state, secrets={}, manager_factory=lambda: manager)
-    assert manager.set_calls == []
+
+    status1 = auth_cookies.ensure_login_saved(
+        state, secrets=SECRETS, manager_factory=lambda: manager)
+    assert status1 == auth_cookies.STATUS_PENDING
+    assert auth_cookies.is_save_pending(state) is True
+
+    status2 = auth_cookies.ensure_login_saved(
+        state, secrets=SECRETS, manager_factory=lambda: manager)
+    assert status2 == auth_cookies.STATUS_CONFIRMED
+    assert auth_cookies.is_save_pending(state) is False
+    assert state[auth_cookies.SAVE_ATTEMPTS] == 0
 
 
-def test_remember_login_without_refresh_token_does_nothing():
-    """session_stateにrefresh tokenが無ければ何もしない"""
+def test_ensure_login_saved_confirms_only_after_async_browser_write_lands():
+    """非同期Cookie（書き込みが次のrerunまで反映されない）: 1回目はpending、
+    実際にブラウザへ届いた2回目で初めてconfirmedになる"""
+    browser = _AsyncBrowser(ready_after=1)
     state = _new_state()
+    state[auth.REFRESH_TOKEN] = _R
+    auth_cookies.begin_remember_login(state)
+
+    status1 = auth_cookies.ensure_login_saved(
+        state, secrets=SECRETS, manager_factory=browser.new_manager)
+    assert status1 == auth_cookies.STATUS_PENDING
+    assert auth_cookies.COOKIE_NAME not in browser.stored, (
+        "ブラウザへ届く前なのに、届いたことにしてしまっている")
+
+    status2 = auth_cookies.ensure_login_saved(
+        state, secrets=SECRETS, manager_factory=browser.new_manager)
+    assert status2 == auth_cookies.STATUS_CONFIRMED
+    fernet = auth_cookies.make_fernet(SECRETS)
+    assert auth_cookies.decrypt_refresh_token(fernet, browser.stored[auth_cookies.COOKIE_NAME]) == _R
+
+
+def test_ensure_login_saved_does_not_confirm_on_stale_mismatched_cookie():
+    """前回ログイン分など、別のrefresh tokenの暗号化Cookieが残っていても、
+    一致しない限り確認済みにはしない（書き込みを要求して次回へ回す）"""
+    fernet = auth_cookies.make_fernet(SECRETS)
+    stale = auth_cookies.encrypt_refresh_token(fernet, "old-refresh-token")
+    manager = _FakeCookieManager(cookies={auth_cookies.COOKIE_NAME: stale})
+    state = _new_state()
+    state[auth.REFRESH_TOKEN] = _R
+    auth_cookies.begin_remember_login(state)
+
+    status = auth_cookies.ensure_login_saved(
+        state, secrets=SECRETS, manager_factory=lambda: manager)
+    assert status == auth_cookies.STATUS_PENDING
+    assert len(manager.set_calls) == 1
+
+
+def test_ensure_login_saved_gives_up_after_max_attempts_without_blocking_login():
+    """確認できる見込みが無い場合でも、試行上限でtimeoutし通常ログインを止めない"""
+    state = _new_state()
+    state[auth.REFRESH_TOKEN] = _R
+    auth_cookies.begin_remember_login(state)
+
+    class _NeverConfirmsManager(_FakeCookieManager):
+        def get(self, name):
+            return None  # ブラウザへ一切届かない状況を模す
+
+    status = auth_cookies.STATUS_PENDING
+    calls = 0
+    while status == auth_cookies.STATUS_PENDING:
+        status = auth_cookies.ensure_login_saved(
+            state, secrets=SECRETS, manager_factory=_NeverConfirmsManager)
+        calls += 1
+        assert calls <= auth_cookies.SAVE_CONFIRM_MAX_ATTEMPTS, "試行上限で終わっていない"
+
+    assert status == auth_cookies.STATUS_TIMEOUT
+    assert auth_cookies.is_save_pending(state) is False
+
+
+def test_ensure_login_saved_without_key_finishes_immediately_without_writing():
+    """AUTH_COOKIE_KEY未設定なら、Cookieへは一切書き込まず即座に終わる（通常ログインは継続）"""
+    state = _new_state()
+    state[auth.REFRESH_TOKEN] = _R
+    auth_cookies.begin_remember_login(state)
     manager = _FakeCookieManager()
-    auth_cookies.remember_login(state, secrets=SECRETS, manager_factory=lambda: manager)
+
+    status = auth_cookies.ensure_login_saved(
+        state, secrets={}, manager_factory=lambda: manager)
+
+    assert status == auth_cookies.STATUS_NO_KEY
     assert manager.set_calls == []
+    assert auth_cookies.is_save_pending(state) is False
+
+
+def test_ensure_login_saved_without_refresh_token_finishes_as_no_token():
+    """session_stateにrefresh tokenが無ければ、書き込まずno_tokenで終わる（想定外ケース）"""
+    state = _new_state()
+    auth_cookies.begin_remember_login(state)
+    manager = _FakeCookieManager()
+
+    status = auth_cookies.ensure_login_saved(
+        state, secrets=SECRETS, manager_factory=lambda: manager)
+
+    assert status == auth_cookies.STATUS_NO_TOKEN
+    assert manager.set_calls == []
+    assert auth_cookies.is_save_pending(state) is False
+
+
+def test_ensure_login_saved_is_noop_when_not_pending():
+    """保存待ちで無い状態（既に確定済み）で呼んでも何もしない"""
+    state = _new_state()
+
+    class _Tripwire(_FakeCookieManager):
+        def get(self, name):
+            raise AssertionError("保存待ちでないのにCookieへ読みに行った")
+
+    status = auth_cookies.ensure_login_saved(
+        state, secrets=SECRETS, manager_factory=lambda: _Tripwire())
+    assert status == auth_cookies.STATUS_CONFIRMED
 
 
 # ── forget_login（ログアウト・パスワード変更時にCookieを消す） ───────────────────

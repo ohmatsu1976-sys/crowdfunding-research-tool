@@ -14,6 +14,7 @@ DBアクセスは candidates.py が行い、ここは Streamlit の画面だけ�
 import streamlit as st
 
 import auth
+import auth_cookies
 import candidates
 import cases
 # 画面切替・案件管理との受け渡しキーは、依存の無い共通モジュールが正本
@@ -366,6 +367,17 @@ def render_admin_screen(client) -> None:
     st.caption(
         "全利用者の候補を閲覧専用で表示します。更新・削除・アーカイブはできません。"
         "自分の候補を操作する場合は「マイ候補リスト」を開いてください。"
+    )
+
+    # 永続ログイン（Cookie）の暗号鍵が認識されているかだけを、値を出さずに表示する
+    _cookie_key_labels = {
+        auth_cookies.KEY_STATUS_CONFIGURED: "✅ 設定済み",
+        auth_cookies.KEY_STATUS_MISSING: "⚠️ 未設定（永続ログイン無効・通常ログインには影響なし）",
+        auth_cookies.KEY_STATUS_INVALID: "⚠️ 不正な形式（永続ログイン無効・通常ログインには影響なし）",
+    }
+    st.caption(
+        "永続ログイン鍵（AUTH_COOKIE_KEY）: "
+        + _cookie_key_labels.get(auth_cookies.key_status(), "不明")
     )
 
     profiles = candidates.list_admin_profiles(client)
