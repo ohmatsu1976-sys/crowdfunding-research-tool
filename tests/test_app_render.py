@@ -1976,6 +1976,7 @@ def test_streamlit_app_touches_last_used_on_run():
 # マイ候補リストからの「商品案件を作成」ボタン。AI返信アシスタント・
 # 訂正/伏せ字化/取消しの画面はこの実装では含まない（AI APIは一切呼ばない）。
 
+import approach_messages  # noqa: E402
 import cases  # noqa: E402
 import cases_ui  # noqa: E402
 
@@ -2342,6 +2343,83 @@ def test_case_detail_approach_message_draft_changes_with_channel():
     assert "Dear" not in body_box.value
 
 
+# ── 文面案UIの再発防止テスト（本番で「古いUIのまま」と報告された不具合の確認用） ──
+# status='not_contacted' は上の各テストの前提そのものなので個別テストは設けず、
+# 送信者プロフィール0件・1件・channel='official' の3実経路をここで確認する。
+
+def test_case_detail_not_contacted_with_zero_sender_profiles_still_shows_draft():
+    """送信者プロフィールが0件でも、文面案（件名・本文・注意書き）は表示される"""
+    row = _app_case_row(status=cases.STATUS_NOT_CONTACTED, primary_channel="email")
+    fake = _FakeCasesClient(cases=[row])
+    assert fake._store["tables"].get("sender_profiles") in (None, []), (
+        "この偽クライアントにsender_profilesの行を一切与えていないことの前提確認"
+    )
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=candidates_ui.VIEW_CASES).run()
+        at.session_state[candidates_ui.SELECTED_CASE_ID] = "case-1"
+        at = at.run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    assert "この画面から送信は行われません" in _text(at), "注意書きが出ていない"
+    assert any(ti.label == "件名" for ti in at.text_input), "件名欄が出ていない"
+    body_box = [ta for ta in at.text_area if ta.label == "本文"][0]
+    assert "[Your Name]" in body_box.value, "0件時のプレースホルダ署名が反映されていない"
+    assert "メッセージ内容（任意のメモ）" not in _text(at), "削除済みの旧UIがまだ出ている"
+
+
+def test_case_detail_not_contacted_with_one_sender_profile_reflects_name_in_draft():
+    """送信者プロフィールが1件のときは、選択欄を出さずそのまま文面案に反映する"""
+    row = _app_case_row(status=cases.STATUS_NOT_CONTACTED, primary_channel="email")
+    fake = _FakeCasesClient(cases=[row])
+    fake._store["tables"]["sender_profiles"] = [{
+        "id": "sp-1", "user_id": "test-user", "sender_name_en": "Taro Yamada",
+        "company_name_en": "Base on Base LLC", "is_default": True,
+        "last_used_at": "2026-11-01T00:00:00+00:00",
+        "created_at": "2026-11-01T00:00:00+00:00", "updated_at": "2026-11-01T00:00:00+00:00",
+    }]
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=candidates_ui.VIEW_CASES).run()
+        at.session_state[candidates_ui.SELECTED_CASE_ID] = "case-1"
+        at = at.run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    assert "この画面から送信は行われません" in _text(at), "注意書きが出ていない"
+    assert not any("差出人プロフィール" in sb.label for sb in at.selectbox), (
+        "1件しかないのに選択欄が出ている"
+    )
+    body_box = [ta for ta in at.text_area if ta.label == "本文"][0]
+    assert "Taro Yamada" in body_box.value, "送信者プロフィールの氏名が文面に反映されていない"
+    assert "Base on Base LLC" in body_box.value, "送信者プロフィールの会社名が文面に反映されていない"
+    assert "メッセージ内容（任意のメモ）" not in _text(at), "削除済みの旧UIがまだ出ている"
+
+
+def test_case_detail_not_contacted_with_official_channel_shows_draft():
+    """primary_channel='official'（本番で報告された値）でも文面案が表示される"""
+    row = _app_case_row(status=cases.STATUS_NOT_CONTACTED, primary_channel="official")
+    fake = _FakeCasesClient(cases=[row])
+    original = supabase_module.create_client
+    supabase_module.create_client = lambda url, key: fake
+    try:
+        at = _app(view=candidates_ui.VIEW_CASES).run()
+        at.session_state[candidates_ui.SELECTED_CASE_ID] = "case-1"
+        at = at.run()
+    finally:
+        supabase_module.create_client = original
+    assert not at.exception, str(at.exception)
+    channel_box = [sb for sb in at.selectbox if sb.label == "連絡チャネル"][0]
+    assert channel_box.value == "official", "primary_channel='official'が初期選択に反映されていない"
+    assert "この画面から送信は行われません" in _text(at), "注意書きが出ていない"
+    assert any(ti.label == "件名" for ti in at.text_input), "件名欄が出ていない（officialは正式書式のはず）"
+    assert approach_messages.USAGE_NOTE_OFFICIAL in _text(at), "公式サイト向けの使い方ガイド文が出ていない"
+    assert "メッセージ内容（任意のメモ）" not in _text(at), "削除済みの旧UIがまだ出ている"
+
+
 def test_case_detail_awaiting_first_reply_shows_followup_and_reply_actions():
     row = _app_case_row(status=cases.STATUS_AWAITING_FIRST_REPLY, next_action_label="1回目フォロー")
     fake = _FakeCasesClient(cases=[row])
@@ -2452,7 +2530,7 @@ def test_case_detail_shows_timeline_from_valid_events_only():
 
 
 def test_case_detail_timeline_shows_correct_redact_void_actions_for_active_event():
-    """有効なイベントには、訂正・伏せ字化・取消しの3操作がすべて開ける"""
+    """有効なイベントには、訂正・本文削除・取消しの3操作がすべて開ける"""
     row = _app_case_row(status=cases.STATUS_ADVANCED)
     events = [_app_event_row()]
     fake = _FakeCasesClient(cases=[row], case_events=events)
@@ -2465,13 +2543,13 @@ def test_case_detail_timeline_shows_correct_redact_void_actions_for_active_event
     finally:
         supabase_module.create_client = original
     assert not at.exception, str(at.exception)
-    action_expanders = [e for e in at.expander if "訂正・伏せ字化・取消し" in e.label]
+    action_expanders = [e for e in at.expander if "訂正・本文削除・取消し" in e.label]
     assert len(action_expanders) == 1
     panel = action_expanders[0]
     assert any("本文" == ta.label for ta in panel.text_area)
     assert any("翻訳文" == ta.label for ta in panel.text_area)
     assert any("取消し理由" in ti.label for ti in panel.text_input)
-    assert any("伏せ字化する" in b.label for b in panel.button)
+    assert any("本文を削除する" in b.label for b in panel.button)
     assert any("取消す" in b.label for b in panel.button)
 
 
@@ -2510,7 +2588,7 @@ def test_case_detail_correct_event_calls_correct_case_event_rpc():
 
 
 def test_case_detail_redact_button_disabled_until_confirmed():
-    """伏せ字化ボタンは、確認チェックを入れるまで押せない"""
+    """本文削除ボタンは、確認チェックを入れるまで押せない"""
     row = _app_case_row(status=cases.STATUS_ADVANCED)
     events = [_app_event_row()]
     fake = _FakeCasesClient(cases=[row], case_events=events)
@@ -2524,7 +2602,7 @@ def test_case_detail_redact_button_disabled_until_confirmed():
         supabase_module.create_client = original
     assert not at.exception, str(at.exception)
     assert "元に戻せない" in _text(at)
-    redact_btn = [b for b in at.button if b.label == "🔒 伏せ字化する"][0]
+    redact_btn = [b for b in at.button if b.label == "🔒 本文を削除する（復元不可）"][0]
     assert redact_btn.disabled is True
 
 
@@ -2545,14 +2623,14 @@ def test_case_detail_redact_confirmed_calls_redact_case_event_rpc():
         confirm_box = [cb for cb in at.checkbox
                       if "元に戻せないことを理解した上で" in cb.label][0]
         at = confirm_box.set_value(True).run()
-        redact_btn = [b for b in at.button if b.label == "🔒 伏せ字化する"][0]
+        redact_btn = [b for b in at.button if b.label == "🔒 本文を削除する（復元不可）"][0]
         assert redact_btn.disabled is False
         at = redact_btn.click().run()
     finally:
         supabase_module.create_client = original
 
     assert not at.exception, str(at.exception)
-    assert "伏せ字化しました" in _text(at)
+    assert "本文を削除しました" in _text(at)
     rpc_calls = [c for c in fake._store["calls"] if c[0] == "redact_case_event"]
     assert len(rpc_calls) == 1
     assert rpc_calls[0][1]["p_event_id"] == "ev-1"
@@ -2613,7 +2691,7 @@ def test_case_detail_void_with_reason_and_confirmation_calls_void_case_event_rpc
 
 
 def test_case_detail_redacted_event_hides_correct_and_redact_actions():
-    """伏せ字化済みのイベントには、訂正・伏せ字化の操作を出さない（取消しのみ）"""
+    """本文削除済みのイベントには、訂正・本文削除の操作を出さない（取消しのみ）"""
     row = _app_case_row(status=cases.STATUS_ADVANCED)
     events = [_app_event_row(redacted_at="2026-11-02T00:00:00+00:00",
                              message_text="［伏せ字化済み：内容は削除されました］")]
@@ -2627,13 +2705,13 @@ def test_case_detail_redacted_event_hides_correct_and_redact_actions():
     finally:
         supabase_module.create_client = original
     assert not at.exception, str(at.exception)
-    assert "🔒伏せ字化済み" in _text(at)
-    action_expanders = [e for e in at.expander if "訂正・伏せ字化・取消し" in e.label]
+    assert "🔒本文削除済み" in _text(at)
+    action_expanders = [e for e in at.expander if "訂正・本文削除・取消し" in e.label]
     assert len(action_expanders) == 1
     panel = action_expanders[0]
-    assert list(panel.text_area) == [], "伏せ字化済みイベントに訂正欄が出ている"
-    assert not any("伏せ字化する" in b.label for b in panel.button), (
-        "伏せ字化済みイベントに伏せ字化ボタンが出ている"
+    assert list(panel.text_area) == [], "本文削除済みイベントに訂正欄が出ている"
+    assert not any("本文を削除する" in b.label for b in panel.button), (
+        "本文削除済みイベントに本文削除ボタンが出ている"
     )
     assert any("取消す" in b.label for b in panel.button), "取消しボタンが出ていない"
 
@@ -2658,7 +2736,7 @@ def test_case_detail_voided_event_has_no_action_panel():
     finally:
         supabase_module.create_client = original
     assert not at.exception, str(at.exception)
-    action_expanders = [e for e in at.expander if "訂正・伏せ字化・取消し" in e.label]
+    action_expanders = [e for e in at.expander if "訂正・本文削除・取消し" in e.label]
     assert len(action_expanders) == 1, "取消し済みイベントにまで操作パネルが出ている"
 
 

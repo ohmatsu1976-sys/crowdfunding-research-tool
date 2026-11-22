@@ -475,7 +475,7 @@ def _event_line(ev: "cases.CaseEvent", *, voided: bool = False) -> str:
     if ev.channel:
         line += f"　（{_CHANNEL_LABELS_JA.get(ev.channel, ev.channel)}）"
     if ev.redacted_at:
-        line += "　🔒伏せ字化済み"
+        line += "　🔒本文削除済み"
     if voided:
         voided_date = cases.to_jst_date(ev.voided_at)
         line += f"　（取消し済み: {voided_date.isoformat() if voided_date else '－'}）"
@@ -498,16 +498,18 @@ def _render_correct_form(client, ev: "cases.CaseEvent") -> None:
 
 
 def _render_redact_action(client, ev: "cases.CaseEvent") -> None:
-    st.markdown("**🔒 伏せ字化**")
+    st.markdown("**🔒 本文を削除**")
     st.warning(
-        "⚠️ 伏せ字化すると、本文・翻訳文・AI支援結果が元に戻せない固定の文言に"
-        "置き換わります。あとから元の内容を復元することはできません。"
+        "⚠️ 本文を削除すると、本文・翻訳文・AI支援結果が元に戻せない固定の文言に"
+        "置き換わります。この操作は復元できません。"
     )
     confirm_key = f"case_redact_confirm_{ev.id}"
-    confirmed = st.checkbox("元に戻せないことを理解した上で、伏せ字化します", key=confirm_key)
-    if st.button("🔒 伏せ字化する", key=f"case_redact_btn_{ev.id}", disabled=not confirmed):
+    confirmed = st.checkbox("元に戻せないことを理解した上で、本文を削除します（復元不可）",
+                            key=confirm_key)
+    if st.button("🔒 本文を削除する（復元不可）", key=f"case_redact_btn_{ev.id}",
+                disabled=not confirmed):
         result = cases.redact_event(client, ev.id)
-        _flash("伏せ字化しました。" if result.ok else result.message)
+        _flash("本文を削除しました。" if result.ok else result.message)
         st.rerun()
 
 
@@ -524,7 +526,7 @@ def _render_void_action(client, ev: "cases.CaseEvent") -> None:
 
 
 def _render_event_actions(client, ev: "cases.CaseEvent") -> None:
-    with st.expander("この記録を訂正・伏せ字化・取消しする", expanded=False):
+    with st.expander("この記録を訂正・本文削除・取消しする", expanded=False):
         if not ev.redacted_at:
             _render_correct_form(client, ev)
             st.divider()
