@@ -548,5 +548,227 @@ def test_logout_clears_category_and_amount_selection_state():
         assert key not in at.session_state.filtered_state, f"{key} が残っている"
 
 
+# ── Indiegogoタブ（公式Public API。kd.search_indiegogo_active_projects を偽物に差し替え）──
+
+def _igg_search_button(at):
+    return [b for b in at.button if "Indiegogoを検索する" in b.label][0]
+
+
+def _fake_igg_result_with_one_product() -> kd.IndiegogoSearchResult:
+    product = kd.IndiegogoProduct(
+        name="IGGテスト商品", url="https://www.indiegogo.com/projects/x/igg-test-item",
+        maker="IGGテストメーカー", short_description="Indiegogoのテスト用商品説明です。",
+        raised_amount=5000.0, currency="USD", goal_amount=1000.0, backers=120,
+        start_date_iso="2026-11-01T00:00:00Z", end_date_iso="2026-12-01T00:00:00Z",
+        percent_funded=500.0, raised_amount_jpy=750000.0, jpy_rate_date="2026-11-23",
+    )
+    result = kd.IndiegogoSearchResult()
+    result.products = [product]
+    result.total_active_count = 1
+    result.matched_count = 1
+    result.jpy_rate_date = "2026-11-23"
+    return result
+
+
+def test_indiegogo_tab_renders_without_calling_api():
+    """タブを開いただけでは検索APIが呼ばれない（Kickstarterと同じ方針）"""
+    calls = []
+    original = kd.search_indiegogo_active_projects
+    kd.search_indiegogo_active_projects = lambda keyword: calls.append(1) or original(keyword)
+    try:
+        at = _goto_discover(_app())
+    finally:
+        kd.search_indiegogo_active_projects = original
+    assert not at.exception, str(at.exception)
+    assert not calls
+    assert "Indiegogo" in _text(at)
+    assert "現在アクティブな商品のみ" in _text(at)
+
+
+def test_indiegogo_tab_has_no_category_or_country_filter():
+    """Indiegogoタブにはカテゴリー・国の絞り込みが出ない
+    （既存のKickstarter用selectbox3つ＝カテゴリー・支援総額上下限から増えない）"""
+    at = _goto_discover(_app())
+    assert len(at.selectbox) == 3, [sb.label for sb in at.selectbox]
+    for sb in at.selectbox:
+        assert "Indiegogo" not in sb.label
+    igg_inputs = [ti for ti in at.text_input if "英語" in ti.label]
+    assert len(igg_inputs) == 1, "Indiegogo用のキーワード入力欄が見つからない"
+
+
+def test_indiegogo_search_calls_api_once_and_shows_result():
+    original = kd.search_indiegogo_active_projects
+    calls = []
+
+    def _fake(keyword):
+        calls.append(keyword)
+        return _fake_igg_result_with_one_product()
+
+    kd.search_indiegogo_active_projects = _fake
+    try:
+        at = _goto_discover(_app())
+        igg_inputs = [ti for ti in at.text_input if "英語" in ti.label]
+        assert len(igg_inputs) == 1
+        at = igg_inputs[0].set_value("camera").run()
+        at = _igg_search_button(at).click().run()
+    finally:
+        kd.search_indiegogo_active_projects = original
+
+    assert not at.exception, str(at.exception)
+    assert calls == ["camera"]
+    body = _text(at)
+    assert "IGGテスト商品" in body
+    assert "IGGテストメーカー" in body
+
+
+def test_indiegogo_empty_keyword_is_accepted_and_searches_all():
+    """Indiegogoはキーワード必須ではない（空欄でも検索できる）"""
+    original = kd.search_indiegogo_active_projects
+    calls = []
+
+    def _fake(keyword):
+        calls.append(keyword)
+        return _fake_igg_result_with_one_product()
+
+    kd.search_indiegogo_active_projects = _fake
+    try:
+        at = _goto_discover(_app())
+        at = _igg_search_button(at).click().run()
+    finally:
+        kd.search_indiegogo_active_projects = original
+
+    assert not at.exception, str(at.exception)
+    assert calls == [""]
+
+
+def test_indiegogo_zero_results_shows_honest_message():
+    original = kd.search_indiegogo_active_projects
+    kd.search_indiegogo_active_projects = lambda keyword: kd.IndiegogoSearchResult(
+        total_active_count=5, matched_count=0)
+    try:
+        at = _goto_discover(_app())
+        at = _igg_search_button(at).click().run()
+    finally:
+        kd.search_indiegogo_active_projects = original
+
+    assert not at.exception, str(at.exception)
+    assert "存在しないという意味ではありません" in _text(at)
+
+
+def test_indiegogo_communication_error_shows_message_without_fake_data():
+    original = kd.search_indiegogo_active_projects
+    kd.search_indiegogo_active_projects = lambda keyword: kd.IndiegogoSearchResult(
+        error="Indiegogo APIへの通信に失敗しました（ConnectionError）")
+    try:
+        at = _goto_discover(_app())
+        at = _igg_search_button(at).click().run()
+    finally:
+        kd.search_indiegogo_active_projects = original
+
+    assert not at.exception, str(at.exception)
+    assert "Indiegogo APIへの通信に失敗しました" in _text(at)
+    assert "IGGテスト商品" not in _text(at)
+
+
+def test_indiegogo_rerun_without_new_click_does_not_call_api_again():
+    original = kd.search_indiegogo_active_projects
+    calls = []
+
+    def _fake(keyword):
+        calls.append(1)
+        return _fake_igg_result_with_one_product()
+
+    kd.search_indiegogo_active_projects = _fake
+    try:
+        at = _goto_discover(_app())
+        at = _igg_search_button(at).click().run()
+        at = at.checkbox[0].run()  # 無関係な再描画（Kickstarter側のチェックボックス）
+    finally:
+        kd.search_indiegogo_active_projects = original
+
+    assert not at.exception, str(at.exception)
+    assert len(calls) == 1
+    assert "IGGテスト商品" in _text(at)
+
+
+def test_indiegogo_use_this_product_button_hands_off_url_and_switches_view():
+    original = kd.search_indiegogo_active_projects
+    kd.search_indiegogo_active_projects = lambda keyword: _fake_igg_result_with_one_product()
+    try:
+        at = _goto_discover(_app())
+        at = _igg_search_button(at).click().run()
+        use_btn = [b for b in at.button if "詳しくリサーチ" in b.label][0]
+        at = use_btn.click().run()
+    finally:
+        kd.search_indiegogo_active_projects = original
+
+    assert not at.exception, str(at.exception)
+    assert at.session_state[candidates_ui.VIEW] == candidates_ui.VIEW_SEARCH
+    assert "https://www.indiegogo.com/projects/x/igg-test-item" in \
+        at.session_state["url_input_text"]
+    assert kdui.PENDING_HANDOFF_URL not in at.session_state.filtered_state
+
+
+def test_indiegogo_missing_data_rendered_safely():
+    """欠損データ（画像・メーカー・金額など）があっても例外を出さない"""
+    product = kd.IndiegogoProduct(
+        name="欠損商品", url="https://www.indiegogo.com/projects/x/missing-data")
+    result = kd.IndiegogoSearchResult(products=[product], total_active_count=1, matched_count=1)
+    original = kd.search_indiegogo_active_projects
+    kd.search_indiegogo_active_projects = lambda keyword: result
+    try:
+        at = _goto_discover(_app())
+        at = _igg_search_button(at).click().run()
+    finally:
+        kd.search_indiegogo_active_projects = original
+
+    assert not at.exception, str(at.exception)
+    body = _text(at)
+    assert "欠損商品" in body
+    assert "未取得" in body or "不明" in body
+
+
+def test_logout_clears_indiegogo_state():
+    original = kd.search_indiegogo_active_projects
+    kd.search_indiegogo_active_projects = lambda keyword: _fake_igg_result_with_one_product()
+    try:
+        at = _goto_discover(_app())
+        at = _igg_search_button(at).click().run()
+    finally:
+        kd.search_indiegogo_active_projects = original
+
+    logout = [b for b in at.button if "ログアウト" in b.label][0]
+    at = logout.click().run()
+    assert not at.exception, str(at.exception)
+    for key in at.session_state.filtered_state:
+        assert not str(key).startswith("kd_"), f"{key} が残っている"
+
+
+# ── Kickstarterタブの回帰確認（タブ追加後も既存の挙動が変わらない）──────────────
+
+def test_kickstarter_tab_still_works_after_adding_indiegogo_tab():
+    """Indiegogoタブ追加後も、既存のKickstarter検索ボタンは最初の1つのまま動く"""
+    calls = []
+    original = kd.run_discovery
+
+    def _fake(client, keyword, statuses, **kwargs):
+        calls.append((keyword, list(statuses)))
+        return _fake_result_with_one_live_product()
+
+    kd.run_discovery = _fake
+    try:
+        at = _goto_discover(_app())
+        at.text_input[0].set_value("アウトドア調理器具").run()
+        search_btn = [b for b in at.button if "検索する" in b.label][0]
+        at = search_btn.click().run()
+    finally:
+        kd.run_discovery = original
+
+    assert not at.exception, str(at.exception)
+    assert len(calls) == 1
+    assert calls[0][0] == "アウトドア調理器具"
+    assert "テスト商品" in _text(at)
+
+
 if __name__ == "__main__":
     sys.exit(run(dict(globals()), "「商品を探す」画面テスト（外部通信なし）"))

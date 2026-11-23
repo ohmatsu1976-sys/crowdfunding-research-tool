@@ -806,5 +806,338 @@ def test_search_and_fetch_caps_unchanged_with_category_and_amount_filters():
     assert result.usage["fetch_calls"] == 4  # PER_STATUS_GUIDELINE["live"]
 
 
+# ── Indiegogo（公式Public API） ────────────────────────────────────────────
+#
+# Anthropicクライアントは一切使わない（requests.get だけを差し替える）。
+# 実際のAPIレスポンス構造（2026-11-23に実機で確認済み）に合わせたフィールド
+# 名をそのまま使う。
+
+def _igg_item(**overrides):
+    base = {
+        "backerCount": 2,
+        "campaignEndDate": "2026-12-19T23:00:00Z",
+        "campaignGoal": 1000.0,
+        "campaignStartDate": "2026-11-21T23:00:00Z",
+        "commentCount": 0,
+        "creatorName": "Blake Farha",
+        "creatorUrlName": "blakefarha",
+        "currencyShortName": "USD",
+        "followerCount": 8,
+        "fundsGathered": 190.6,
+        "projectHomeUrl": "https://www.indiegogo.com/projects/blakefarha/wearexylophone",
+        "projectImageUrl": "https://cdn.images.indiegogo.com/x.png",
+        "projectName": "Xylophone: Berlin's Hottest Musical Comedy",
+        "projectType": 1,
+        "projectUrlName": "wearexylophone",
+        "rewardCount": 12,
+        "shortDescription": "A camera backpack for outdoor adventures.",
+        "updateCount": 0,
+    }
+    base.update(overrides)
+    return base
+
+
+class _IggResp:
+    def __init__(self, status_code=200, payload=None, raise_json_error=False):
+        self.status_code = status_code
+        self._payload = payload
+        self._raise_json_error = raise_json_error
+
+    def json(self):
+        if self._raise_json_error:
+            raise ValueError("not json")
+        return self._payload
+
+
+_ECB_OK_RESP_BODY = (
+    b'<?xml version="1.0" encoding="UTF-8"?>'
+    b'<gesmes:Envelope xmlns:gesmes="http://www.gesmes.org/xml/2002-08-01" '
+    b'xmlns="http://www.ecb.int/vocabulary/2002-08-01/eurofxref">'
+    b'<Cube><Cube time="2026-11-23">'
+    b'<Cube currency="USD" rate="1.08"/><Cube currency="JPY" rate="160.0"/>'
+    b'</Cube></Cube></gesmes:Envelope>'
+)
+
+
+class _EcbOkResp:
+    status_code = 200
+    content = _ECB_OK_RESP_BODY
+
+
+def _patch_requests_get(fake_get):
+    import requests
+    original = requests.get
+    requests.get = fake_get
+    return original
+
+
+def _unpatch_requests_get(original):
+    import requests
+    requests.get = original
+
+
+def test_parse_igg_active_item_maps_official_fields():
+    """公式APIの実フィールド名（2026-11-23確認）を正しくマッピングする"""
+    p = kd._parse_igg_active_item(_igg_item())
+    assert p is not None
+    assert p.name == "Xylophone: Berlin's Hottest Musical Comedy"
+    assert p.url == "https://www.indiegogo.com/projects/blakefarha/wearexylophone"
+    assert p.maker == "Blake Farha"
+    assert p.raised_amount == 190.6
+    assert p.currency == "USD"
+    assert p.goal_amount == 1000.0
+    assert p.backers == 2
+    assert p.start_date_iso == "2026-11-21T23:00:00Z"
+    assert p.end_date_iso == "2026-12-19T23:00:00Z"
+
+
+def test_parse_igg_active_item_without_url_is_rejected():
+    """projectHomeUrlが無い項目は採用しない（架空URLを作らない）"""
+    assert kd._parse_igg_active_item(_igg_item(projectHomeUrl="")) is None
+    assert kd._parse_igg_active_item(_igg_item(projectHomeUrl=None)) is None
+
+
+def test_parse_igg_active_item_handles_missing_fields_safely():
+    """欠損フィールドは安全な既定値（空文字・None）になる（推測で埋めない）"""
+    item = {"projectHomeUrl": "https://www.indiegogo.com/projects/x/y"}
+    p = kd._parse_igg_active_item(item)
+    assert p is not None
+    assert p.name == ""
+    assert p.maker == ""
+    assert p.short_description == ""
+    assert p.raised_amount is None
+    assert p.currency == ""
+    assert p.goal_amount is None
+    assert p.backers is None
+    assert p.start_date_iso == ""
+    assert p.end_date_iso == ""
+
+
+def test_parse_igg_active_item_rejects_non_dict():
+    assert kd._parse_igg_active_item("not a dict") is None
+    assert kd._parse_igg_active_item(None) is None
+
+
+def test_indiegogo_matches_keyword_case_insensitive_partial_match():
+    p = kd._parse_igg_active_item(_igg_item(
+        projectName="Smart Camera Backpack", shortDescription="For travel."))
+    assert kd.indiegogo_matches_keyword(p, "camera") is True
+    assert kd.indiegogo_matches_keyword(p, "CAMERA") is True
+    assert kd.indiegogo_matches_keyword(p, "Backpack") is True
+    assert kd.indiegogo_matches_keyword(p, "travel") is True  # 説明文側も対象
+    assert kd.indiegogo_matches_keyword(p, "watch") is False
+
+
+def test_indiegogo_matches_keyword_empty_keyword_matches_everything():
+    p = kd._parse_igg_active_item(_igg_item())
+    assert kd.indiegogo_matches_keyword(p, "") is True
+    assert kd.indiegogo_matches_keyword(p, "   ") is True
+    assert kd.indiegogo_matches_keyword(p, None) is True
+
+
+def test_fetch_indiegogo_active_projects_success():
+    original = _patch_requests_get(
+        lambda *a, **k: _IggResp(200, [_igg_item()]))
+    try:
+        data, error = kd.fetch_indiegogo_active_projects()
+    finally:
+        _unpatch_requests_get(original)
+    assert error == ""
+    assert len(data) == 1
+
+
+def test_fetch_indiegogo_active_projects_handles_connection_error():
+    """通信エラーでは架空データで補完せず、エラー文言だけを返す"""
+    import requests as _requests
+    original = _patch_requests_get(
+        lambda *a, **k: (_ for _ in ()).throw(
+            _requests.exceptions.ConnectionError("no network in test")))
+    try:
+        data, error = kd.fetch_indiegogo_active_projects()
+    finally:
+        _unpatch_requests_get(original)
+    assert data == []
+    assert error
+
+
+def test_fetch_indiegogo_active_projects_handles_timeout():
+    import requests as _requests
+    original = _patch_requests_get(
+        lambda *a, **k: (_ for _ in ()).throw(_requests.exceptions.Timeout("timeout")))
+    try:
+        data, error = kd.fetch_indiegogo_active_projects()
+    finally:
+        _unpatch_requests_get(original)
+    assert data == []
+    assert error
+
+
+def test_fetch_indiegogo_active_projects_handles_non_200_status():
+    original = _patch_requests_get(lambda *a, **k: _IggResp(503, None))
+    try:
+        data, error = kd.fetch_indiegogo_active_projects()
+    finally:
+        _unpatch_requests_get(original)
+    assert data == []
+    assert "503" in error
+
+
+def test_fetch_indiegogo_active_projects_handles_malformed_json():
+    original = _patch_requests_get(
+        lambda *a, **k: _IggResp(200, None, raise_json_error=True))
+    try:
+        data, error = kd.fetch_indiegogo_active_projects()
+    finally:
+        _unpatch_requests_get(original)
+    assert data == []
+    assert error
+
+
+def test_fetch_indiegogo_active_projects_handles_unexpected_response_shape():
+    """配列以外（例: {"error":...}）が返った場合も安全に扱う"""
+    original = _patch_requests_get(lambda *a, **k: _IggResp(200, {"unexpected": "shape"}))
+    try:
+        data, error = kd.fetch_indiegogo_active_projects()
+    finally:
+        _unpatch_requests_get(original)
+    assert data == []
+    assert error
+
+
+def test_search_indiegogo_active_projects_filters_and_converts_jpy():
+    items = [
+        _igg_item(projectName="Camera Backpack", shortDescription="For travel.",
+                  projectHomeUrl="https://www.indiegogo.com/a"),
+        _igg_item(projectName="Smart Watch", shortDescription="Tracks your sleep.",
+                  projectHomeUrl="https://www.indiegogo.com/b"),
+    ]
+    call_log = []
+
+    def _fake_get(url, timeout=None):
+        call_log.append(url)
+        if "ecb.europa.eu" in url:
+            return _EcbOkResp()
+        return _IggResp(200, items)
+
+    original = _patch_requests_get(_fake_get)
+    try:
+        result = kd.search_indiegogo_active_projects("camera")
+    finally:
+        _unpatch_requests_get(original)
+
+    assert result.error == ""
+    assert result.total_active_count == 2
+    assert result.matched_count == 1
+    assert len(result.products) == 1
+    assert result.products[0].name == "Camera Backpack"
+    assert result.products[0].raised_amount_jpy is not None
+    assert result.jpy_rate_date == "2026-11-23"
+
+
+def test_search_indiegogo_active_projects_empty_keyword_returns_all():
+    items = [
+        _igg_item(projectHomeUrl="https://www.indiegogo.com/a"),
+        _igg_item(projectHomeUrl="https://www.indiegogo.com/b"),
+    ]
+
+    def _fake_get(url, timeout=None):
+        if "ecb.europa.eu" in url:
+            return _EcbOkResp()
+        return _IggResp(200, items)
+
+    original = _patch_requests_get(_fake_get)
+    try:
+        result = kd.search_indiegogo_active_projects("")
+    finally:
+        _unpatch_requests_get(original)
+
+    assert result.matched_count == 2
+
+
+def test_search_indiegogo_active_projects_zero_matches_is_not_an_error():
+    items = [_igg_item(projectName="Camera Backpack")]
+
+    def _fake_get(url, timeout=None):
+        if "ecb.europa.eu" in url:
+            return _EcbOkResp()
+        return _IggResp(200, items)
+
+    original = _patch_requests_get(_fake_get)
+    try:
+        result = kd.search_indiegogo_active_projects("submarine")
+    finally:
+        _unpatch_requests_get(original)
+
+    assert result.error == ""
+    assert result.matched_count == 0
+    assert result.products == []
+    assert result.total_active_count == 1
+
+
+def test_search_indiegogo_active_projects_dedupes_same_url():
+    items = [
+        _igg_item(projectHomeUrl="https://www.indiegogo.com/same"),
+        _igg_item(projectHomeUrl="https://www.indiegogo.com/same"),
+    ]
+
+    def _fake_get(url, timeout=None):
+        if "ecb.europa.eu" in url:
+            return _EcbOkResp()
+        return _IggResp(200, items)
+
+    original = _patch_requests_get(_fake_get)
+    try:
+        result = kd.search_indiegogo_active_projects("")
+    finally:
+        _unpatch_requests_get(original)
+
+    assert result.total_active_count == 1
+    assert result.matched_count == 1
+
+
+def test_search_indiegogo_active_projects_propagates_fetch_error_without_fake_data():
+    import requests as _requests
+    original = _patch_requests_get(
+        lambda *a, **k: (_ for _ in ()).throw(
+            _requests.exceptions.ConnectionError("no network in test")))
+    try:
+        result = kd.search_indiegogo_active_projects("camera")
+    finally:
+        _unpatch_requests_get(original)
+
+    assert result.error
+    assert result.products == []
+    assert result.total_active_count == 0
+    assert result.matched_count == 0
+
+
+def test_search_indiegogo_active_projects_handles_multiple_currencies_and_missing_amount():
+    items = [
+        _igg_item(projectHomeUrl="https://www.indiegogo.com/usd", currencyShortName="USD",
+                  fundsGathered=100.0),
+        _igg_item(projectHomeUrl="https://www.indiegogo.com/eur", currencyShortName="EUR",
+                  fundsGathered=100.0),
+        _igg_item(projectHomeUrl="https://www.indiegogo.com/none", fundsGathered=None),
+    ]
+
+    def _fake_get(url, timeout=None):
+        if "ecb.europa.eu" in url:
+            return _EcbOkResp()
+        return _IggResp(200, items)
+
+    original = _patch_requests_get(_fake_get)
+    try:
+        result = kd.search_indiegogo_active_projects("")
+    finally:
+        _unpatch_requests_get(original)
+
+    by_url = {p.url: p for p in result.products}
+    assert by_url["https://www.indiegogo.com/usd"].raised_amount_jpy is not None
+    assert by_url["https://www.indiegogo.com/eur"].raised_amount_jpy is not None
+    none_p = by_url["https://www.indiegogo.com/none"]
+    assert none_p.raised_amount_jpy is None
+    assert none_p.jpy_unavailable_reason  # 「金額未取得」等の理由が残る
+
+
 if __name__ == "__main__":
     sys.exit(run(dict(globals()), "kickstarter_discovery 単体テスト（外部通信なし）"))

@@ -1062,3 +1062,161 @@ def run_discovery(client, keyword: str, selected_statuses: List[str],
         "fetch_elapsed_sec": round(fetch_elapsed, 1),
     }
     return result
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# Indiegogo（公式Public API）
+#
+# Kickstarterの検索（Claude Web Search/Web Fetch）とは別の仕組み。Indiegogoの
+# 公式Public API（https://help.indiegogo.com/article/616-indiegogo-public-api
+# で確認済み）には、キーワード・カテゴリー検索を行うエンドポイントが無く、
+# 「現在アクティブな全プロジェクト」を返す一覧取得エンドポイントが1つあるだけ
+# （2026-11-23時点で実際に疎通確認済み。認証不要）。そのため、一覧をまとめて
+# 取得し、商品名・短い説明文へのキーワード部分一致をPython側で行う。
+# Anthropic APIは一切使わない（Kickstarter側のロジックには影響しない）。
+# ───────────────────────────────────────────────────────────────────────────────
+
+IGG_ACTIVE_PROJECTS_URL = (
+    "https://www.indiegogo.com/api/public/projects/getActiveCrowdfundingProjects"
+)
+IGG_REQUEST_TIMEOUT = 15
+
+
+@dataclass
+class IndiegogoProduct:
+    name: str = ""
+    url: str = ""
+    image_url: str = ""
+    maker: str = ""
+    short_description: str = ""
+    raised_amount: Optional[float] = None
+    currency: str = ""
+    goal_amount: Optional[float] = None
+    backers: Optional[int] = None
+    start_date_iso: str = ""
+    end_date_iso: str = ""
+
+    # Python側の計算結果
+    percent_funded: Optional[float] = None
+    raised_amount_jpy: Optional[float] = None
+    jpy_rate_date: str = ""
+    jpy_unavailable_reason: str = ""
+
+
+@dataclass
+class IndiegogoSearchResult:
+    products: List[IndiegogoProduct] = field(default_factory=list)
+    total_active_count: int = 0   # キーワード絞り込み前の、取得できたアクティブ件数
+    matched_count: int = 0        # キーワード絞り込み後の件数
+    error: str = ""                # 通信・解析エラー（空文字なら正常終了）
+    jpy_rate_date: str = ""
+    jpy_rate_error: str = ""
+
+
+def fetch_indiegogo_active_projects(
+    timeout: int = IGG_REQUEST_TIMEOUT,
+) -> Tuple[List[Dict[str, Any]], str]:
+    """Indiegogo公式Public APIから現在アクティブな全プロジェクトを取得する
+
+    戻り値は (生データのリスト, エラー文言)。通信エラー・タイムアウト・
+    HTTPエラー・想定外の応答形式では ([], エラー文言) を返す。
+    架空データで補完することは一切しない。
+    """
+    try:
+        resp = requests.get(IGG_ACTIVE_PROJECTS_URL, timeout=timeout)
+    except requests.RequestException as e:
+        return [], f"Indiegogo APIへの通信に失敗しました（{type(e).__name__}）"
+    if resp.status_code != 200:
+        return [], f"Indiegogo APIがエラーを返しました（HTTP {resp.status_code}）"
+    try:
+        data = resp.json()
+    except ValueError:
+        return [], "Indiegogo APIの応答を解析できませんでした"
+    if not isinstance(data, list):
+        return [], "Indiegogo APIの応答形式が想定と異なります"
+    return data, ""
+
+
+def _parse_igg_active_item(item: Dict[str, Any]) -> Optional[IndiegogoProduct]:
+    """公式APIの1件分をIndiegogoProductへ変換する。URLが取れなければNone
+
+    欠けているフィールドは安全な既定値（空文字・None）にするだけで、
+    推測で埋めない。
+    """
+    if not isinstance(item, dict):
+        return None
+    url = str(item.get("projectHomeUrl") or "").strip()
+    if not url:
+        return None
+    return IndiegogoProduct(
+        name=str(item.get("projectName") or ""),
+        url=url,
+        image_url=str(item.get("projectImageUrl") or ""),
+        maker=str(item.get("creatorName") or ""),
+        short_description=str(item.get("shortDescription") or ""),
+        raised_amount=_to_float(item.get("fundsGathered")),
+        currency=str(item.get("currencyShortName") or ""),
+        goal_amount=_to_float(item.get("campaignGoal")),
+        backers=_to_int(item.get("backerCount")),
+        start_date_iso=str(item.get("campaignStartDate") or ""),
+        end_date_iso=str(item.get("campaignEndDate") or ""),
+    )
+
+
+def indiegogo_matches_keyword(product: IndiegogoProduct, keyword: str) -> bool:
+    """商品名・短い説明文を対象に、大文字小文字を無視した部分一致で判定する
+
+    キーワードが空（前後の空白だけを含む場合も）なら常にTrue（絞り込み無し）。
+    日本語キーワードの英訳は行わない（商品データが英語のため、英語キーワード
+    を想定した単純な部分一致）。
+    """
+    needle = (keyword or "").strip().lower()
+    if not needle:
+        return True
+    haystack = f"{product.name} {product.short_description}".lower()
+    return needle in haystack
+
+
+def search_indiegogo_active_projects(keyword: str) -> IndiegogoSearchResult:
+    """Indiegogo公式Public APIから現在アクティブなプロジェクトを取得し、
+    キーワードで絞り込む
+
+    公式APIにサーバー側のキーワード検索は無いため、1回の一覧取得を
+    Python側で絞り込む。Anthropic APIへは一切接続しない。
+    """
+    result = IndiegogoSearchResult()
+    raw_items, error = fetch_indiegogo_active_projects()
+    if error:
+        result.error = error
+        return result
+
+    seen_urls = set()
+    products: List[IndiegogoProduct] = []
+    for item in raw_items:
+        p = _parse_igg_active_item(item)
+        if p is None or p.url in seen_urls:
+            continue
+        seen_urls.add(p.url)
+        products.append(p)
+    result.total_active_count = len(products)
+
+    matched = [p for p in products if indiegogo_matches_keyword(p, keyword)]
+
+    rates, rate_date, rate_error = fetch_ecb_rates()
+    result.jpy_rate_date = rate_date
+    result.jpy_rate_error = rate_error
+    for p in matched:
+        jpy, reason = convert_to_jpy(p.raised_amount, p.currency, rates)
+        p.raised_amount_jpy = jpy
+        p.jpy_rate_date = rate_date if jpy is not None else ""
+        p.jpy_unavailable_reason = reason
+        if p.raised_amount is not None and p.goal_amount:
+            try:
+                p.percent_funded = round(
+                    float(p.raised_amount) / float(p.goal_amount) * 100, 1)
+            except (TypeError, ZeroDivisionError, ValueError):
+                p.percent_funded = None
+
+    result.products = matched
+    result.matched_count = len(matched)
+    return result

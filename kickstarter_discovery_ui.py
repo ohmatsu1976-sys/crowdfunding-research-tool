@@ -35,6 +35,12 @@ LAST_MAX_YEN = "kd_last_max_yen"
 TOP_ERROR = "kd_top_error"
 PENDING_HANDOFF_URL = "kd_pending_handoff_url"   # streamlit_app.py が読んで検索欄へ渡す
 
+# Indiegogoタブ（公式Public API。Kickstarterタブとは独立した状態）
+IGG_KEYWORD_INPUT = "kd_igg_keyword_input"
+IGG_RESULT = "kd_igg_result"
+IGG_LAST_KEYWORD = "kd_igg_last_keyword"
+IGG_TOP_ERROR = "kd_igg_top_error"
+
 _PREFIX = "kd_"
 
 _STATUS_CHECKBOX_KEYS = {
@@ -70,6 +76,10 @@ def init_state(state) -> None:
         state[RESULT] = None
     if TOP_ERROR not in state:
         state[TOP_ERROR] = ""
+    if IGG_RESULT not in state:
+        state[IGG_RESULT] = None
+    if IGG_TOP_ERROR not in state:
+        state[IGG_TOP_ERROR] = ""
 
 
 def clear_state(state) -> None:
@@ -141,6 +151,119 @@ def _format_category(p: "kd.Product") -> str:
     if p.category_raw:
         return f"{p.category_raw}（親カテゴリー未確認）"
     return "未取得"
+
+
+def _format_igg_date(iso: str) -> str:
+    """ISO日時文字列から日付部分だけを安全に取り出す（無ければ「不明」）"""
+    text = (iso or "").strip()
+    if not text:
+        return "不明"
+    return text.split("T")[0] if "T" in text else text
+
+
+def _render_indiegogo_product_card(p: "kd.IndiegogoProduct", idx) -> None:
+    with st.container(border=True):
+        cols = st.columns([1, 3])
+        with cols[0]:
+            if p.image_url:
+                try:
+                    st.image(p.image_url, width="stretch")
+                except Exception:
+                    pass
+        with cols[1]:
+            st.markdown(f"**{p.name or '（商品名未取得）'}**")
+            st.caption(p.short_description or "（商品概要は取得できませんでした）")
+            st.write(
+                f"支援総額: {_format_amount(p.raised_amount, p.currency)}　／　"
+                f"日本円概算: {_format_jpy(p)}"
+            )
+            if p.jpy_rate_date:
+                st.caption(f"為替レート基準日（ECB）: {p.jpy_rate_date}")
+            st.write(
+                f"目標額: {_format_amount(p.goal_amount, p.currency)}　／　"
+                f"達成率: {f'{p.percent_funded:.0f}%' if p.percent_funded is not None else '未取得'}　／　"
+                f"支援者数: {p.backers if p.backers is not None else '未取得'}人"
+            )
+            st.write(
+                f"開始日: {_format_igg_date(p.start_date_iso)}　／　"
+                f"終了日: {_format_igg_date(p.end_date_iso)}　／　"
+                f"メーカー: {p.maker or '不明'}"
+            )
+            st.caption(f"URL: {p.url}")
+
+            btn_col1, btn_col2 = st.columns(2)
+            with btn_col1:
+                if st.button("🔍 この商品を詳しくリサーチ", key=f"kd_igg_use_{idx}_{p.url}"):
+                    st.session_state[PENDING_HANDOFF_URL] = p.url
+                    st.session_state[candidates_ui.PENDING_VIEW] = candidates_ui.VIEW_SEARCH
+                    st.rerun()
+            with btn_col2:
+                st.link_button("🌐 Indiegogoで確認", p.url, width="stretch")
+
+
+def _render_indiegogo_tab() -> None:
+    """Indiegogoタブ（公式Public API）を描画する
+
+    公式APIにはキーワード・カテゴリー検索が無いため、現在アクティブな
+    プロジェクト一覧を取得してからキーワードで絞り込む。そのためKickstarter
+    タブとは異なり、カテゴリー・国での絞り込みは表示しない。
+    """
+    st.info(
+        "Indiegogoは、公式APIの仕様上、**現在アクティブな商品のみ**が検索対象です"
+        "（終了済み・調達成功済みの商品は一覧に含まれません）。"
+        "カテゴリー・国による絞り込みはできません。",
+        icon="ℹ️",
+    )
+
+    err = st.session_state.get(IGG_TOP_ERROR, "")
+    if err:
+        st.error(err)
+
+    with st.form("kd_igg_search_form"):
+        st.text_input(
+            "キーワード（英語・任意）",
+            key=IGG_KEYWORD_INPUT,
+            placeholder="例: camera / backpack / smart watch",
+            help="商品名・概要への部分一致です（大文字小文字は区別しません）。"
+                "空欄の場合は現在アクティブな商品すべてが対象になります。",
+        )
+        st.caption("処理には数秒程度かかります。")
+        igg_submitted = st.form_submit_button("🔍 Indiegogoを検索する", type="primary")
+
+    if igg_submitted:
+        st.session_state[IGG_TOP_ERROR] = ""
+        keyword = st.session_state.get(IGG_KEYWORD_INPUT, "")
+        with st.spinner("Indiegogoを検索中です..."):
+            result = kd.search_indiegogo_active_projects(keyword)
+        if result.error:
+            st.session_state[IGG_TOP_ERROR] = result.error
+            st.session_state[IGG_RESULT] = None
+        else:
+            st.session_state[IGG_RESULT] = result
+            st.session_state[IGG_LAST_KEYWORD] = keyword
+        st.rerun()
+
+    result = st.session_state.get(IGG_RESULT)
+    if result is not None:
+        st.divider()
+        last_keyword = st.session_state.get(IGG_LAST_KEYWORD, "")
+        st.caption(
+            f"検索条件: キーワード「{last_keyword or '（なし）'}」／ "
+            f"現在アクティブな商品 {result.total_active_count} 件のうち "
+            f"{result.matched_count} 件が一致"
+        )
+        if not result.products:
+            st.info(
+                "今回の検索条件に一致する商品を確認できませんでした。"
+                "これはIndiegogo上に該当商品が存在しないという意味ではありません"
+                "（現在アクティブな商品だけが検索対象です）。"
+                "キーワードを変えて再度お試しください。"
+            )
+        for i, p in enumerate(result.products):
+            _render_indiegogo_product_card(p, idx=i)
+
+        if result.jpy_rate_error:
+            st.caption(f"為替レート取得エラー: {result.jpy_rate_error}（日本円概算は未取得として表示しています）")
 
 
 def _render_product_card(p: "kd.Product", idx, show_match_badge: bool = False) -> None:
@@ -307,11 +430,8 @@ def _render_result(result: "kd.DiscoveryResult", selected_statuses: List[str],
             st.caption(f"為替レート取得エラー: {result.jpy_rate_error}（日本円概算は未取得として表示しています）")
 
 
-def render_screen(client) -> None:
-    """「商品を探す」画面を描画する（streamlit_app.py から呼ぶ）"""
-    init_state(st.session_state)
-
-    st.subheader("🔎 商品を探す")
+def _render_kickstarter_tab(client) -> None:
+    """Kickstarterタブ（既存のAI検索。ロジック・UIともに変更なし）を描画する"""
     st.info(
         "検索条件に合う候補をAIが探して表示します。"
         "Kickstarter上のすべての商品を網羅する検索ではありません。",
@@ -415,3 +535,21 @@ def render_screen(client) -> None:
         )
         _render_result(result, last_statuses, category=last_category,
                        min_yen=last_min_yen, max_yen=last_max_yen)
+
+
+def render_screen(client) -> None:
+    """「商品を探す」画面を描画する（streamlit_app.py から呼ぶ）
+
+    Kickstarter（既存のAI検索）とIndiegogo（公式Public API）をタブで分ける。
+    タブを分けるのは、両者の検索条件（カテゴリー・国の絞り込み可否、検索対象
+    範囲）が異なり、1つの検索条件に混在させると誤解を招くため。
+    """
+    init_state(st.session_state)
+
+    st.subheader("🔎 商品を探す")
+
+    tab_ks, tab_igg = st.tabs(["Kickstarter", "Indiegogo"])
+    with tab_ks:
+        _render_kickstarter_tab(client)
+    with tab_igg:
+        _render_indiegogo_tab()
