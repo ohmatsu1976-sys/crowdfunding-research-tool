@@ -311,6 +311,48 @@ def _render_product_card(p: "kd.Product", idx, show_match_badge: bool = False) -
                 st.link_button("🌐 Kickstarterで確認", p.url, width="stretch")
 
 
+def _render_unconfirmed_candidate_card(card: "kd.CandidateCard") -> None:
+    """個別ページ取得が未確認の候補を、確実な情報だけで最小限に表示する
+
+    商品名はWeb Searchの検索結果タイトルをそのまま使う。タイトルが
+    無い・不明確な場合は商品名を創作せず、確実な情報であるURLを表示する。
+    """
+    display_name = card.title.strip() if card.title and card.title.strip() else card.url
+    with st.container(border=True):
+        st.markdown(f"**{display_name}**")
+        st.caption("カテゴリー・支援総額・支援者数・募集状況・終了日: 未確認")
+        st.caption(f"URL: {card.url}")
+        st.link_button("🌐 Kickstarterで確認", card.url, width="stretch")
+
+
+def _render_candidate_section(result: "kd.DiscoveryResult") -> None:
+    """検索で見つかった候補を、個別ページ取得の成否に関わらず一覧表示する
+
+    - 候補0件：候補が無い旨を案内する。
+    - 候補あり・詳細未確認：タイトル・URLだけの最小限カード。
+    - 詳細確認済み：既存の商品カード（条件一致が確認できた場合のみ
+      「✅ 検索条件に一致」を表示する）。
+    """
+    st.markdown(f"#### 条件に近い商品候補（{result.candidate_count}件）")
+    if result.candidate_count == 0:
+        st.info(
+            "今回の検索では候補を確認できませんでした。"
+            "これはKickstarter上に該当商品が存在しないという意味ではありません。"
+            "キーワードや選択ステータスを変えて再度お試しください。"
+        )
+        return
+    st.caption(
+        "検索条件をもとに見つかった商品候補です。支援金額や募集状況など、"
+        "一部の条件はまだ確認できていません。気になる商品はKickstarterで詳細をご確認ください。"
+    )
+    for i, card in enumerate(result.candidate_cards):
+        if card.detail_confirmed and card.product is not None:
+            _render_product_card(card.product, idx=f"cand_{i}",
+                                 show_match_badge=card.condition_matched)
+        else:
+            _render_unconfirmed_candidate_card(card)
+
+
 def _render_summary_counts(result: "kd.DiscoveryResult") -> None:
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -327,60 +369,10 @@ def _render_summary_counts(result: "kd.DiscoveryResult") -> None:
 def _render_result(result: "kd.DiscoveryResult", selected_statuses: List[str],
                    category: str = "all", min_yen: Optional[int] = None,
                    max_yen: Optional[int] = None) -> None:
-    has_condition = (category != "all") or (min_yen is not None) or (max_yen is not None)
     _render_summary_counts(result)
     st.divider()
 
-    any_shown = False
-    for status in (kd.STATUS_LIVE, kd.STATUS_LATE_PLEDGE, kd.STATUS_ENDED):
-        if status not in selected_statuses:
-            continue
-        items = result.by_status.get(status, [])
-        st.markdown(f"#### {_badge(status)} {kd.STATUS_LABELS_JA[status]}（{len(items)}件）")
-        if not items:
-            if status == kd.STATUS_LIVE:
-                st.info(
-                    "今回の検索では、条件に合うライブ商品を確認できませんでした。"
-                    "キーワードを変えるか、終了済みも検索対象に加えてお試しください。"
-                )
-            else:
-                st.caption("該当する候補はありませんでした。")
-        for i, p in enumerate(items):
-            _render_product_card(p, idx=f"{status}_{i}", show_match_badge=has_condition)
-            any_shown = True
-
-    if result.unknown_status:
-        st.markdown(f"#### ❓ 状態を確認できなかった候補（{len(result.unknown_status)}件）")
-        for i, p in enumerate(result.unknown_status):
-            _render_product_card(p, idx=f"unknown_{i}")
-            any_shown = True
-
-    # ── 条件外・判定不能の商品（カテゴリー不一致・金額不一致・状態不一致・
-    #    カテゴリー/金額判定不能をまとめて1か所で確認できるようにする）──────────
-    condition_groups = [
-        ("選択したステータスと一致しなかった候補", result.off_selection, "off"),
-        ("終了日時と表示文言が矛盾した候補", result.mismatch, "mismatch"),
-        ("選択カテゴリーと一致しなかった、または金額が条件外の候補",
-         result.excluded_condition, "cond"),
-        ("カテゴリーを確認できなかった候補", result.category_unknown, "catunk"),
-        ("支援総額を確認できなかった候補", result.amount_unknown, "amtunk"),
-    ]
-    total_condition_items = sum(len(items) for _, items, _ in condition_groups)
-    if total_condition_items or result.excluded_non_physical:
-        with st.expander(
-            f"条件外・判定不能の商品を確認（{total_condition_items + len(result.excluded_non_physical)}件）",
-            expanded=False,
-        ):
-            for title, items, tag in condition_groups:
-                if not items:
-                    continue
-                st.markdown(f"**{title}（{len(items)}件）**")
-                for i, p in enumerate(items):
-                    _render_product_card(p, idx=f"{tag}_{i}")
-            if result.excluded_non_physical:
-                st.markdown(f"**物理商品ではないため除外した候補（{len(result.excluded_non_physical)}件）**")
-                for e in result.excluded_non_physical:
-                    st.caption(f"- {e['url']}（{e['reason']}）")
+    _render_candidate_section(result)
 
     with st.expander("取得できなかった・除外した候補の詳細", expanded=False):
         if result.fetch_failed:
@@ -406,13 +398,6 @@ def _render_result(result: "kd.DiscoveryResult", selected_statuses: List[str],
     if result.search_errors:
         for msg in result.search_errors:
             st.warning(f"検索中にエラーが発生しました: {msg}")
-
-    if not any_shown and not result.unknown_status:
-        st.info(
-            "今回の検索では候補を確認できませんでした。"
-            "これはKickstarter上に該当商品が存在しないという意味ではありません。"
-            "キーワードや選択ステータスを変えて再度お試しください。"
-        )
 
     with st.expander("処理コスト・時間（概算）", expanded=False):
         u = result.usage or {}

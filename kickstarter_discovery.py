@@ -312,6 +312,22 @@ class Product:
 
 
 @dataclass
+class CandidateCard:
+    """検索で見つかった候補1件分のカード（個別ページ取得の成否に関わらず常に作られる）
+
+    detail_confirmed=Falseの間は、Web Searchの検索結果から実際に確認できた
+    url・titleだけを確実な情報として持つ。商品名が無い場合は空文字のままにし、
+    推測で創作しない（表示側がurlへフォールバックする）。
+    """
+    url: str = ""
+    title: str = ""
+    search_status: str = ""
+    detail_confirmed: bool = False     # Web Fetchで個別ページの詳細を確認できたか
+    condition_matched: bool = False    # 検索条件（カテゴリー・金額・状態）への一致を確認できたか
+    product: Optional[Product] = None  # detail_confirmed=Trueの場合のみ設定
+
+
+@dataclass
 class DiscoveryResult:
     by_status: Dict[str, List[Product]] = field(
         default_factory=lambda: {s: [] for s in STATUS_OPTIONS})
@@ -323,6 +339,7 @@ class DiscoveryResult:
     excluded_invalid_url: List[Dict[str, str]] = field(default_factory=list)
     fetch_failed: List[Dict[str, str]] = field(default_factory=list)
     candidates_dropped_by_cap: List[Dict[str, str]] = field(default_factory=list)
+    candidate_cards: List[CandidateCard] = field(default_factory=list)
     search_errors: List[str] = field(default_factory=list)
     usage: Dict[str, Any] = field(default_factory=dict)
     jpy_rate_date: str = ""
@@ -818,10 +835,12 @@ def run_status_search(client, status: str, keyword: str,
                       category: str = CATEGORY_ALL,
                       min_yen: Optional[int] = None,
                       max_yen: Optional[int] = None,
-                      ) -> Tuple[List[Tuple[str, str]], Dict[str, int], str]:
+                      ) -> Tuple[List[Tuple[str, str]], Dict[str, str], Dict[str, int], str]:
     """1ステータスにつき最大1回のWeb Search呼び出し
 
-    戻り値は ([(候補URL, status)], usage, エラー文言)。
+    戻り値は ([(候補URL, status)], {候補URL: 検索結果のタイトル}, usage, エラー文言)。
+    タイトルはWeb Fetchが失敗した場合に、商品名を推測・創作せず表示するための
+    確実な情報として使う（無ければ空文字。推測で補完しない）。
     category・min_yen・max_yenは検索意図の優先付けに使うだけで、最終判定には
     使わない（最終判定は必ずWeb Fetchで取得した実データで行う）。
     """
@@ -834,11 +853,12 @@ def run_status_search(client, status: str, keyword: str,
                       "content": _search_prompt(status, keyword, category, min_yen, max_yen)}],
         )
     except Exception as e:
-        return [], {}, f"{type(e).__name__}: {e}"
+        return [], {}, {}, f"{type(e).__name__}: {e}"
 
     urls = extract_search_result_urls(message)
     tagged = [(url, status) for url, _title in urls]
-    return tagged, _usage_from(message), ""
+    titles = {url: title for url, title in urls if title}
+    return tagged, titles, _usage_from(message), ""
 
 
 def run_product_fetch(client, url: str, search_status: str,
@@ -961,10 +981,12 @@ def run_discovery(client, keyword: str, selected_statuses: List[str],
 
     # ── Phase A: Web Search（ステータスごとに最大1回、合計最大3回）──────────
     raw_candidates: List[Tuple[str, str]] = []
+    title_by_url: Dict[str, str] = {}
     for status in selected_statuses[:MAX_SEARCH_CALLS]:
-        tagged, usage, error = run_status_search(
+        tagged, titles, usage, error = run_status_search(
             client, status, keyword, model_id, category=category,
             min_yen=min_yen, max_yen=max_yen)
+        title_by_url.update(titles)
         total_in += usage.get("input_tokens", 0)
         total_out += usage.get("output_tokens", 0)
         if error:
@@ -984,6 +1006,15 @@ def run_discovery(client, keyword: str, selected_statuses: List[str],
     if not raw_candidates and not result.search_errors:
         result.search_errors.append("検索結果に候補URLが含まれていませんでした")
 
+    # 候補カードは個別ページ取得の成否に関わらず常に作る（商品名が未確認の場合は
+    # Web Searchのタイトルをそのまま使い、無ければurlを使う。推測で創作しない）
+    candidate_cards: List[CandidateCard] = [
+        CandidateCard(url=u, title=title_by_url.get(u, ""), search_status=s)
+        for u, s in capped
+    ]
+    cards_by_url: Dict[str, CandidateCard] = {c.url: c for c in candidate_cards}
+    result.candidate_cards = candidate_cards
+
     # ── Phase B/C: Web Fetch（最大10件）─────────────────────────────────
     t1 = time.time()
     fetch_count = 0
@@ -1000,6 +1031,11 @@ def run_discovery(client, keyword: str, selected_statuses: List[str],
             result.fetch_failed.append({"url": url, "reason": error or "不明なエラー"})
             continue
         fetch_success_count += 1
+
+        card = cards_by_url.get(url)
+        if card is not None:
+            card.detail_confirmed = True
+            card.product = product
 
         # カテゴリーは常に正規化して保持する（カテゴリー条件が無くても表示に使う）
         product.category_parent = normalize_category(product.category_raw) or ""
@@ -1046,6 +1082,16 @@ def run_discovery(client, keyword: str, selected_statuses: List[str],
             key=lambda p: (p.raised_amount_jpy is None, -(p.raised_amount_jpy or 0)))
 
     result.matched_count = sum(len(result.by_status[s]) for s in STATUS_OPTIONS)
+
+    # 検索条件（カテゴリー・金額・状態）すべてに一致すると確認できたURLだけに
+    # 印を付ける（未確認・条件外の候補を条件一致済みとして扱わないため）
+    matched_source_urls = {
+        p.source_url for lst in result.by_status.values() for p in lst
+    }
+    for card in candidate_cards:
+        if card.product is not None and card.product.source_url in matched_source_urls:
+            card.condition_matched = True
+
     result.off_condition_count = (
         len(result.off_selection) + len(result.mismatch)
         + len(result.excluded_condition) + len(result.excluded_non_physical)

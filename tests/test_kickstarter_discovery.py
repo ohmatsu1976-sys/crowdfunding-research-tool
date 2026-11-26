@@ -310,9 +310,10 @@ def test_run_status_search_tags_candidates_with_status_and_calls_tool():
     client = _FakeClient([_search_message([
         ("https://www.kickstarter.com/projects/foo/bar", "Foo Bar"),
     ])])
-    tagged, usage, error = kd.run_status_search(client, kd.STATUS_LIVE, "アウトドア調理器具")
+    tagged, titles, usage, error = kd.run_status_search(client, kd.STATUS_LIVE, "アウトドア調理器具")
     assert error == ""
     assert tagged == [("https://www.kickstarter.com/projects/foo/bar", kd.STATUS_LIVE)]
+    assert titles == {"https://www.kickstarter.com/projects/foo/bar": "Foo Bar"}
     tool = client.messages.calls[0]["tools"][0]
     assert tool["type"] == "web_search_20260209"
     assert tool["allowed_domains"] == ["kickstarter.com"]
@@ -323,8 +324,9 @@ def test_run_status_search_tags_candidates_with_status_and_calls_tool():
 
 def test_run_status_search_returns_error_message_on_exception():
     client = _FakeClient([RuntimeError("rate limited")])
-    tagged, usage, error = kd.run_status_search(client, kd.STATUS_LIVE, "x")
+    tagged, titles, usage, error = kd.run_status_search(client, kd.STATUS_LIVE, "x")
     assert tagged == []
+    assert titles == {}
     assert "rate limited" in error
 
 
@@ -440,6 +442,129 @@ def test_run_discovery_end_to_end_with_fake_client():
     assert result.jpy_rate_date == "2026-10-19"
     assert result.usage["search_calls"] == 2
     assert result.usage["fetch_calls"] == 2
+
+    # 候補カードは個別ページ取得の成否に関わらず常に作られ、条件一致が
+    # 確認できたものだけにcondition_matchedが立つ
+    assert len(result.candidate_cards) == 2
+    urls = {c.url for c in result.candidate_cards}
+    assert urls == {live_url, ended_url}
+    for card in result.candidate_cards:
+        assert card.detail_confirmed is True
+        assert card.condition_matched is True
+        assert card.product is not None
+
+
+# ── 候補カード：個別ページ取得の成否に関わらず一覧表示できること ──────────────
+
+def test_candidate_cards_are_built_even_when_all_fetches_fail():
+    """8件見つかっても個別取得が全滅した場合でも、8件の候補カードが作られる
+    （本番で報告された『候補8件・個別取得0件』の再現と修正確認）
+
+    件数配分はステータスごとの上限目安（ライブ4／遅延プレッジ3／終了済み3）に
+    収まるようにする（上限自体は別テストで確認済み）。
+    """
+    def _urls(label, n):
+        return [(f"https://www.kickstarter.com/projects/foo/{label}-item-{i}", f"{label} {i}")
+                for i in range(n)]
+
+    search_live = _search_message(_urls("live", 3))
+    search_late = _search_message(_urls("late", 3))
+    search_ended = _search_message(_urls("ended", 2))
+    fail_resp = {
+        "content": [
+            {"type": "web_fetch_tool_result", "content": {"error_code": "url_not_accessible"}},
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 0},
+    }
+    client = _FakeClient(
+        [search_live, search_late, search_ended] + [fail_resp for _ in range(8)])
+    result = kd.run_discovery(
+        client, "x", [kd.STATUS_LIVE, kd.STATUS_LATE_PLEDGE, kd.STATUS_ENDED],
+        now=datetime(2026, 10, 19, 6, 0, 0, tzinfo=timezone.utc))
+
+    assert result.candidate_count == 8
+    assert len(result.candidate_cards) == 8
+    assert result.fetch_success_count == 0
+    for card in result.candidate_cards:
+        assert card.title, f"タイトルが空になっている: {card.url}"
+        assert card.detail_confirmed is False
+        assert card.condition_matched is False
+        assert card.product is None
+
+
+def test_candidate_card_title_is_empty_not_fabricated_when_search_has_no_title():
+    """検索結果にタイトルが無い場合、架空の商品名を作らず空文字のままにする"""
+    search_resp = _search_message([
+        ("https://www.kickstarter.com/projects/foo/no-title-item", ""),
+    ])
+    fail_resp = {
+        "content": [
+            {"type": "web_fetch_tool_result", "content": {"error_code": "url_not_accessible"}},
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 0},
+    }
+    client = _FakeClient([search_resp, fail_resp])
+    result = kd.run_discovery(client, "x", [kd.STATUS_LIVE],
+                              now=datetime(2026, 10, 19, 6, 0, 0, tzinfo=timezone.utc))
+    assert len(result.candidate_cards) == 1
+    assert result.candidate_cards[0].title == ""
+
+
+def test_candidate_card_not_condition_matched_when_excluded_by_category():
+    """個別取得に成功しても、カテゴリー等の条件に合わなければcondition_matchedにしない"""
+    url = "https://www.kickstarter.com/projects/foo/not-tech-gadget"
+    search_resp = _search_message([(url, "Some Gadget")])
+    fetch_resp = _fetch_message(url, "2026-10-19T06:00:00+00:00", {
+        "name": "Hand Knit Scarf", "image_url": None, "summary_ja": "手編みマフラーです。",
+        "category_raw": "Knitting", "maker": "M", "country": "US",
+        "raised_amount": 20000, "currency": "USD", "goal_amount": 10000, "backers": 100,
+        "launch_date": "2026-01-01", "end_date_iso": "2026-03-01",
+        "days_left_text_raw": None, "late_pledge_confirmed": False,
+        "reported_status_text": "funded", "canonical_url": url,
+    })
+    client = _FakeClient([search_resp, fetch_resp])
+    result = kd.run_discovery(client, "x", [kd.STATUS_ENDED], category="Technology",
+                              now=datetime(2026, 10, 19, 6, 0, 0, tzinfo=timezone.utc))
+    assert len(result.candidate_cards) == 1
+    card = result.candidate_cards[0]
+    assert card.detail_confirmed is True
+    assert card.condition_matched is False
+    assert card.product is not None
+    assert card.product.exclusion_reason == "選択カテゴリーと不一致"
+
+
+def test_candidate_cards_exclude_invalid_and_duplicate_urls():
+    """不正なURL・重複URLは候補カードに含まれない（正規化・重複排除を経由する）"""
+    valid_url = "https://www.kickstarter.com/projects/foo/valid-item"
+    search_resp = _search_message([
+        (valid_url, "Valid Item"),
+        (valid_url + "?ref=share", "Valid Item (dup via query string)"),
+        ("https://www.kickstarter.com/discover/categories/technology", "Not a project page"),
+        ("https://example.com/not-kickstarter", "Unrelated site"),
+    ])
+    fail_resp = {
+        "content": [
+            {"type": "web_fetch_tool_result", "content": {"error_code": "url_not_accessible"}},
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 0},
+    }
+    client = _FakeClient([search_resp, fail_resp])
+    result = kd.run_discovery(client, "x", [kd.STATUS_LIVE],
+                              now=datetime(2026, 10, 19, 6, 0, 0, tzinfo=timezone.utc))
+    assert result.candidate_count == 1
+    assert len(result.candidate_cards) == 1
+    assert result.candidate_cards[0].url == valid_url
+    assert len(result.excluded_duplicate) == 1
+    assert len(result.excluded_invalid_url) == 2
+
+
+def test_candidate_cards_empty_when_no_candidates_found():
+    search_resp = _search_message([])
+    client = _FakeClient([search_resp])
+    result = kd.run_discovery(client, "x", [kd.STATUS_LIVE],
+                              now=datetime(2026, 10, 19, 6, 0, 0, tzinfo=timezone.utc))
+    assert result.candidate_count == 0
+    assert result.candidate_cards == []
 
 
 def test_run_discovery_respects_fetch_cap_of_ten():

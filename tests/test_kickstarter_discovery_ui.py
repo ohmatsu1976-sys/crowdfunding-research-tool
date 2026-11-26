@@ -174,6 +174,13 @@ def _fake_result_with_one_live_product() -> kd.DiscoveryResult:
     )
     result = kd.DiscoveryResult()
     result.by_status[kd.STATUS_LIVE] = [product]
+    result.candidate_cards = [kd.CandidateCard(
+        url=product.url, title=product.name, search_status=kd.STATUS_LIVE,
+        detail_confirmed=True, condition_matched=True, product=product,
+    )]
+    result.candidate_count = 1
+    result.fetch_success_count = 1
+    result.matched_count = 1
     result.usage = {"search_calls": 1, "fetch_calls": 1, "input_tokens": 100,
                     "output_tokens": 20, "search_elapsed_sec": 1.0, "fetch_elapsed_sec": 1.0}
     result.jpy_rate_date = "2026-10-19"
@@ -245,6 +252,72 @@ def test_zero_results_shows_honest_message_not_nonexistence_claim():
     assert not at.exception, str(at.exception)
     body = _text(at)
     assert "存在しないという意味ではありません" in body
+
+
+def test_zero_candidates_heading_shows_zero_count():
+    original = kd.run_discovery
+    kd.run_discovery = lambda client, keyword, statuses, **kwargs: kd.DiscoveryResult(
+        usage={"search_calls": 1, "fetch_calls": 0, "input_tokens": 1, "output_tokens": 1,
+              "search_elapsed_sec": 0.1, "fetch_elapsed_sec": 0.0})
+    try:
+        at = _goto_discover(_app())
+        at.text_input[0].set_value("存在しないであろう商品").run()
+        search_btn = [b for b in at.button if "検索する" in b.label][0]
+        at = search_btn.click().run()
+    finally:
+        kd.run_discovery = original
+
+    assert not at.exception, str(at.exception)
+    assert "条件に近い商品候補（0件）" in _text(at)
+
+
+def _fake_result_with_unconfirmed_candidates() -> kd.DiscoveryResult:
+    """候補は見つかったが、個別ページ取得が全て失敗したケース
+    （本番で報告された『候補8件・個別取得0件』を模したテスト用データ）"""
+    result = kd.DiscoveryResult()
+    result.candidate_cards = [
+        kd.CandidateCard(url="https://www.kickstarter.com/projects/x/titled-item",
+                         title="タイトル付き商品", search_status=kd.STATUS_LIVE),
+        kd.CandidateCard(url="https://www.kickstarter.com/projects/x/no-title-item",
+                         title="", search_status=kd.STATUS_LIVE),
+    ]
+    result.candidate_count = 2
+    result.fetch_success_count = 0
+    result.fetch_failed = [
+        {"url": "https://www.kickstarter.com/projects/x/titled-item",
+         "reason": "Web Fetch失敗: url_not_accessible"},
+        {"url": "https://www.kickstarter.com/projects/x/no-title-item",
+         "reason": "Web Fetch失敗: url_not_accessible"},
+    ]
+    result.usage = {"search_calls": 1, "fetch_calls": 2, "input_tokens": 10,
+                    "output_tokens": 2, "search_elapsed_sec": 0.1, "fetch_elapsed_sec": 0.2}
+    return result
+
+
+def test_unconfirmed_candidates_shown_with_heading_caption_and_no_fabricated_name():
+    """候補は見つかったが個別取得が全滅した場合でも、候補一覧が表示される
+    （本番で報告された『候補8件・個別取得0件』問題の修正確認）"""
+    original = kd.run_discovery
+    kd.run_discovery = lambda client, keyword, statuses, **kwargs: \
+        _fake_result_with_unconfirmed_candidates()
+    try:
+        at = _goto_discover(_app())
+        at.text_input[0].set_value("アウトドア調理器具").run()
+        search_btn = [b for b in at.button if "検索する" in b.label][0]
+        at = search_btn.click().run()
+    finally:
+        kd.run_discovery = original
+
+    assert not at.exception, str(at.exception)
+    body = _text(at)
+    assert "条件に近い商品候補（2件）" in body
+    assert "検索条件をもとに見つかった商品候補です" in body
+    assert "タイトル付き商品" in body
+    assert "https://www.kickstarter.com/projects/x/titled-item" in body
+    # タイトルが無い候補でも、商品名を創作せず確実な情報（URL）を表示する
+    assert "https://www.kickstarter.com/projects/x/no-title-item" in body
+    assert "未確認" in body
+    assert "検索条件に一致" not in body
 
 
 # ── 既存リサーチ画面への接続 ───────────────────────────────────────────────────
@@ -465,6 +538,13 @@ def _fake_result_with_condition_mismatches() -> kd.DiscoveryResult:
     result.off_selection = [off]
     result.category_unknown = [cat_unknown]
     result.amount_unknown = [amt_unknown]
+    result.candidate_cards += [
+        kd.CandidateCard(url=off.url, title=off.name, detail_confirmed=True, product=off),
+        kd.CandidateCard(url=cat_unknown.url, title=cat_unknown.name,
+                         detail_confirmed=True, product=cat_unknown),
+        kd.CandidateCard(url=amt_unknown.url, title=amt_unknown.name,
+                         detail_confirmed=True, product=amt_unknown),
+    ]
     result.candidate_count = 4
     result.fetch_success_count = 4
     result.matched_count = 1
@@ -496,7 +576,9 @@ def test_summary_counts_are_displayed():
     assert labels.get("金額判定不能数") == "1"
 
 
-def test_condition_mismatch_products_shown_in_dedicated_expander_with_reason():
+def test_condition_mismatch_products_shown_in_candidate_section_with_reason():
+    """条件に合わなかった候補も『条件に近い商品候補』の一覧に表示され、
+    理由が分かる（条件一致済みとして扱われない）"""
     original = kd.run_discovery
     kd.run_discovery = lambda client, keyword, statuses, **kwargs: \
         _fake_result_with_condition_mismatches()
@@ -509,14 +591,14 @@ def test_condition_mismatch_products_shown_in_dedicated_expander_with_reason():
         kd.run_discovery = original
 
     assert not at.exception, str(at.exception)
-    expander_labels = [e.label for e in at.expander]
-    assert any("条件外・判定不能の商品を確認" in lbl for lbl in expander_labels)
     body = _text(at)
+    assert "条件に近い商品候補（4件）" in body
     assert "状態不一致商品" in body
     assert "カテゴリー不明商品" in body
     assert "金額不明商品" in body
     assert "状態が検索条件と不一致" in body
     assert "カテゴリーを確認できない" in body
+    assert body.count("検索条件に一致") == 1, "条件一致済みでない候補にも一致バッジが付いている"
 
 
 # ── ログアウト時の新規stateクリア（カテゴリー・金額）────────────────────────────
