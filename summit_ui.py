@@ -32,6 +32,7 @@ from research_crowdfunding import (
     find_creator_site,
     find_official_site,
     get_contact_info,
+    is_platform_domain,
 )
 
 TITLE = "海外ブランド AIリサーチアシスタント｜サミット特典版"
@@ -68,12 +69,9 @@ def _resolve_contact(p: Dict[str, Any]) -> Dict[str, Any]:
               "facebook": _UNCONFIRMED, "instagram": _UNCONFIRMED, "linkedin": _UNCONFIRMED}
     official_url = ""
     for site_url in creator_websites:
-        if not site_url:
-            continue
-        if "indiegogo.com" in site_url or "kickstarter.com" in site_url:
-            if not official_url:
-                official_url = site_url
-                contact["official_url"] = site_url
+        if not site_url or is_platform_domain(site_url):
+            # クリエイターページ・プロジェクトページ自体はメーカー独自の
+            # 公式サイトではないため、official_urlの候補にしない
             continue
         c = get_contact_info(site_url, brand=p.get("maker", "") or p.get("_creator_slug", ""))
         if c.get("email", _UNCONFIRMED) != _UNCONFIRMED or \
@@ -84,9 +82,12 @@ def _resolve_contact(p: Dict[str, Any]) -> Dict[str, Any]:
         if official_url == "":
             contact = c
             official_url = site_url
-    if not official_url and creator_websites:
-        official_url = creator_websites[0]
-        contact["official_url"] = official_url
+    if not official_url:
+        _non_platform = next((u for u in creator_websites
+                              if u and not is_platform_domain(u)), "")
+        if _non_platform:
+            official_url = _non_platform
+            contact["official_url"] = official_url
     return contact
 
 

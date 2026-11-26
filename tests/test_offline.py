@@ -121,6 +121,39 @@ def test_unknown_maker_never_reaches_sales_email():
     assert "[Brand / Team Name]" in body
 
 
+# ── プラットフォーム自身のURL判定（公式サイトの誤表示防止） ──────────────────
+
+def test_is_platform_domain_detects_kickstarter_and_indiegogo():
+    assert r.is_platform_domain("https://www.kickstarter.com/projects/x/y") is True
+    assert r.is_platform_domain("https://www.indiegogo.com/projects/evogap") is True
+
+
+def test_is_platform_domain_detects_indiegogo_creator_profile_page():
+    """本番で報告されたEvoGapのケース：クリエイタープロフィールページ"""
+    assert r.is_platform_domain("https://www.indiegogo.com/individuals/evogap") is True
+    assert r.is_platform_domain("https://www.indiegogo.com/en/creators/evogap") is True
+
+
+def test_is_platform_domain_detects_bare_and_subdomains():
+    """スキーム無しの"www."無しホスト・サブドメインも判定できる"""
+    assert r.is_platform_domain("https://kickstarter.com/projects/x/y") is True
+    assert r.is_platform_domain("https://support.kickstarter.com/help") is True
+
+
+def test_is_platform_domain_rejects_lookalike_domains():
+    """部分文字列一致ではなくホスト名で判定するため、偽装・類似ドメインは
+    誤ってプラットフォームと判定しない（＝公式サイトとして正しく採用できる）"""
+    assert r.is_platform_domain("https://evil-kickstarter.com") is False
+    assert r.is_platform_domain("https://kickstarter.com.evil.com") is False
+    assert r.is_platform_domain("https://notindiegogo.com") is False
+    assert r.is_platform_domain("https://maker.example.com") is False
+
+
+def test_is_platform_domain_handles_invalid_or_empty_url():
+    assert r.is_platform_domain("") is False
+    assert r.is_platform_domain("not a url") is False
+
+
 # ── 送信者プロフィール: 会社名・屋号が任意であることの、メール生成側の実証 ──────
 # 氏名は必須・会社名は任意（sender_profiles.py側）。ここでは
 # streamlit_app.py → analyze_with_claude() → build_approach_email() という

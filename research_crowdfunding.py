@@ -265,6 +265,32 @@ def search_indiegogo(limit: int = 20) -> List[Dict]:
 # 公式サイト URL を探す
 # ───────────────────────────────────────────────────────────────────────────────
 
+# クラウドファンディング・プラットフォーム自身のドメイン（メーカー独自の
+# 公式サイトではあり得ないホスト）。サブドメインも対象だが、偽装ドメイン
+# （kickstarter.com.evil.com / evil-kickstarter.com 等）は対象外にする。
+_PLATFORM_DOMAINS = ("kickstarter.com", "indiegogo.com")
+
+
+def is_platform_domain(url: str) -> bool:
+    """URLのホスト名がKickstarter/Indiegogo自身（またはそのサブドメイン）か判定する
+
+    部分文字列検索では "notkickstarter.com" や "kickstarter.com.evil.com" のような
+    偽装・類似ドメインを誤って本物と判定してしまうため、urllib.parseでホスト名
+    だけを取り出してから判定する。クリエイターページ・プロジェクトページは
+    メーカー独自の公式サイトではないため、ここで真と判定されたURLは
+    official_url（公式サイトURL）として採用してはならない。
+    """
+    if not url:
+        return False
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    return any(host == domain or host.endswith("." + domain) for domain in _PLATFORM_DOMAINS)
+
+
 def find_official_site(project_url: str, maker_name: str) -> list:
     """クラファンページからメーカー公式サイト URL リストを返す（複数対応）"""
     if not project_url.startswith("http"):

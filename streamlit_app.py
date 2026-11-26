@@ -30,6 +30,7 @@ from research_crowdfunding import (
     find_official_site,
     find_creator_site,
     get_contact_info,
+    is_platform_domain,
 )
 from summary_table import build_summary_html
 import contact_info
@@ -461,13 +462,10 @@ if run:
         }
         official_url = ""
         for site_url in creator_websites:
-            if not site_url:
-                continue
-            # IGG/KSドメインはスクレイピング不要 → URLだけ保持してスキップ
-            if "indiegogo.com" in site_url or "kickstarter.com" in site_url:
-                if not official_url:
-                    official_url = site_url
-                    contact["official_url"] = site_url
+            if not site_url or is_platform_domain(site_url):
+                # クリエイターページ・プロジェクトページ自体はメーカー独自の
+                # 公式サイトではないため、official_urlの候補にしない
+                # （未確認のままresolve_priority()の掲載URLへフォールバックさせる）
                 continue
             c = get_contact_info(site_url, brand=_maker or _slug)
             # メール or フォームが見つかった時点で確定
@@ -479,9 +477,12 @@ if run:
             if official_url == "":
                 contact = c
                 official_url = site_url
-        if not official_url and creator_websites:
-            official_url = creator_websites[0]
-            contact["official_url"] = official_url
+        if not official_url:
+            _non_platform = next((u for u in creator_websites
+                                  if u and not is_platform_domain(u)), "")
+            if _non_platform:
+                official_url = _non_platform
+                contact["official_url"] = official_url
 
         if official_url:
             log_lines.append(f"      🌐 公式サイト: {official_url[:50]}")

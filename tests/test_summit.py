@@ -160,6 +160,8 @@ def test_resolve_contact_falls_back_to_find_creator_site():
 
 
 def test_resolve_contact_kickstarter_domain_skips_scraping():
+    """KS/IGG自身のURLはスクレイピングせず、公式サイトURLとしても採用しない
+    （プロジェクトページはメーカー独自の公式サイトではないため）"""
     restore = _patch(
         find_official_site=lambda url, maker: [],
         find_creator_site=lambda slug, name, maker: "",
@@ -171,7 +173,65 @@ def test_resolve_contact_kickstarter_domain_skips_scraping():
         contact = summit_ui._resolve_contact(p)
     finally:
         restore()
-    assert contact["official_url"] == "https://www.kickstarter.com/projects/x/y"
+    assert contact["official_url"] == ""
+
+
+def test_resolve_contact_indiegogo_creator_page_not_treated_as_official_site():
+    """Indiegogoのクリエイタープロフィールページが公式サイトとして採用されない"""
+    restore = _patch(
+        find_official_site=lambda url, maker: [],
+        find_creator_site=lambda slug, name, maker: "",
+        get_contact_info=_never_called("get_contact_info"),
+    )
+    try:
+        p = {"url": "https://www.indiegogo.com/projects/evogap",
+             "platform": "Indiegogo",
+             "_creator_websites": ["https://www.indiegogo.com/individuals/evogap"],
+             "_valid_profile_url": "https://www.indiegogo.com/individuals/evogap"}
+        contact = summit_ui._resolve_contact(p)
+    finally:
+        restore()
+    assert contact["official_url"] == ""
+
+
+def test_resolve_contact_prefers_genuine_site_over_platform_url():
+    """公式サイトとプラットフォームURLが両方候補にある場合は公式サイトを優先する"""
+    restore = _patch(
+        find_official_site=lambda url, maker: [],
+        find_creator_site=lambda slug, name, maker: "",
+        get_contact_info=lambda site_url, brand="": {
+            "official_url": site_url, "email": "未確認", "contact_form": "未確認",
+            "facebook": "未確認", "instagram": "未確認", "linkedin": "未確認"},
+    )
+    try:
+        p = {"url": "https://www.indiegogo.com/projects/evogap",
+             "platform": "Indiegogo",
+             "_creator_websites": ["https://www.indiegogo.com/individuals/evogap",
+                                   "https://maker.example.com"]}
+        contact = summit_ui._resolve_contact(p)
+    finally:
+        restore()
+    assert contact["official_url"] == "https://maker.example.com"
+
+
+def test_resolve_contact_rejects_lookalike_platform_domain():
+    """偽装ドメイン（kickstarter.com風だが別ホスト）は公式サイトとして採用してよい
+    （部分文字列一致ではなくホスト名で判定しているため誤って弾かれない）"""
+    restore = _patch(
+        find_official_site=lambda url, maker: [],
+        find_creator_site=lambda slug, name, maker: "",
+        get_contact_info=lambda site_url, brand="": {
+            "official_url": site_url, "email": "maker@evil-kickstarter.com",
+            "contact_form": "未確認",
+            "facebook": "未確認", "instagram": "未確認", "linkedin": "未確認"},
+    )
+    try:
+        p = {"url": "https://www.kickstarter.com/projects/x/y",
+             "_creator_websites": ["https://evil-kickstarter.com"]}
+        contact = summit_ui._resolve_contact(p)
+    finally:
+        restore()
+    assert contact["official_url"] == "https://evil-kickstarter.com"
 
 
 def test_resolve_contact_returns_unconfirmed_when_nothing_found():
